@@ -1,0 +1,24 @@
+# threads
+
+CLI + Claude Code skill for GrepMem-style threads (append-only log, summary, regex recall). Built for a
+restricted work machine. Read `GLOSSARY.md` for the terms and use them exactly; decisions are in
+`docs/adr/`; notes, status and the interview record are on the vault hub `brain/projects/threads/`.
+
+## Hard rules
+
+- `thread.py` stays one file, Python standard library only, no network (ADR 0002). Target Python 3.9+.
+- Thread data never goes into a repository (ADR 0001). Tests use `THREADS_HOME` in a temp directory.
+- The log is append-only and lossless. Cap only what is printed, never what is stored.
+- A hook must never fail a session: `thread hook` catches everything and writes `errors.log`.
+- A feature on the README "Not in v1" table needs the owner's OK before it is built.
+
+## Run
+
+- Tests (the only gate): `python3 -m unittest discover -s tests`
+- Try it without touching real data: `THREADS_HOME=/tmp/t python3 thread.py new "demo"`
+
+## Layout
+
+- `thread.py` the CLI; `tests/test_thread.py`; `skill/thread/SKILL.md` the skill; `hooks.json` the
+  hooks to paste into `~/.claude/settings.json`; `docs/LOG.md` development log.
+- When a command changes, update `README.md` and `skill/thread/SKILL.md` in the same commit.

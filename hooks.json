@@ -1,0 +1,8 @@
+{
+  "hooks": {
+    "Stop": [{ "hooks": [{ "type": "command", "command": "thread hook" }] }],
+    "PreCompact": [{ "hooks": [{ "type": "command", "command": "thread hook" }] }],
+    "SessionEnd": [{ "hooks": [{ "type": "command", "command": "thread hook" }] }],
+    "SessionStart": [{ "matcher": "compact", "hooks": [{ "type": "command", "command": "thread hook" }] }]
+  }
+}
