@@ -40,8 +40,9 @@ All commands are the local `thread` CLI. It uses no network.
   pass `-t <id>` on every command.
 - `note`, `checkpoint` and `close` need text on stdin. Without it they fail (`empty text`, or
   after a 5-second wait).
-- Run `thread grep` as a command on its own. Its output is not stored in the log (it only repeats
-  the log), and anything else the same shell command prints is lost with it.
+- Run `thread grep` as a command on its own. Its call and output are stored but never searched
+  (the output only repeats the log), and anything else the same shell command prints becomes
+  unsearchable with it.
 - A session has one active thread. `thread new` or `thread open` on another thread moves capture
   to it from that point on; say so to the user before you switch.
 
@@ -120,7 +121,9 @@ EOF
 
 Leave out empty headings. For an idea thread, Progress holds the candidate ideas and how well each
 is supported. For a finding you may need to re-check, cite its log line (`<id>:<line>` from grep).
-When the summary nears the limit, cut finished work down to one line each.
+When the summary nears the limit, cut finished work down to one line each. Keep exact identifiers
+in the summary (paths, error strings, commit ids, flag names): they are what a later session will
+grep for.
 
 ### Searching
 
@@ -134,15 +137,23 @@ that were actually used and try alternatives: `thread grep 'timeout|timed out|ET
   grep that id to see both.
 
 - `--count` first when a pattern may be broad.
-- Matches come newest first, 10 per page, fewer when the lines are long; follow the `--offset N`
-  hint in the footer for older ones; `--max` up to 30.
+- Matches come newest entry first, 10 per page, fewer when the lines are long; follow the
+  `--offset N` hint in the footer for older ones; `--max` up to 30. For "what was said first", add
+  `--oldest`.
+- `--count` and every page footer break the matches down by entry type. When most of them are
+  `tool_use` or `tool_result`, narrow with `--type`.
 - `--type user,assistant,note` searches only what was said and noted, leaving out file contents
-  and command output. Use it to find a decision. Types: `user`, `assistant`, `thinking`,
-  `tool_use`, `tool_result`, `subagent`, `note`, `checkpoint`, `event`.
+  and command output. Use it to find a decision. The user's answers to question prompts are
+  `tool_result` entries, so for "what did the user answer" search `--type tool_result,user`.
+  Types: `user`, `assistant`, `thinking`, `tool_use`, `tool_result`, `subagent`, `notification`,
+  `compaction`, `note`, `checkpoint`, `event`.
+- With `--all`, `--count` also lists the matches per thread: use it to find the thread a subject
+  belongs to.
 - `--context N` sets the lines shown around each match, inside its entry: 0 to 3, default 1.
 - `--all` searches every thread, open and closed. Use it to find earlier work on the same subject.
-- Each match shows `thread:line` and the entry header: time, session, entry type and, for tool
-  calls and results, the tool name and call id.
+- Matches of one entry are listed under its header (`thread:line`, time, session, entry type), each
+  line with its line number, `>` on the matching lines and `--` where lines are left out. The
+  header of a tool result ends with `<- ` and the call that produced it.
 - Printed lines are clipped to 400 characters. For the full text, read
   `~/.threads/<thread>/log.txt` at the line number shown.
 - Earlier `thread grep` commands and their output are not searched.

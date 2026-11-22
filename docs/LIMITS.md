@@ -7,7 +7,7 @@ The short version is in the [README](../README.md#what-it-does-not-capture).
 
 - Capture reads Claude Code's transcript files, whose format is not documented and may change.
 - Only the main session is captured. A subagent's work appears as the prompt it was given and the
-  report it returned.
+  report it handed back; its internal steps are not captured.
 - Capture runs when a turn ends (also when it ends in an API error), before compaction, at session
   end, and on `new`, `open` (of an open thread), `reopen`, `note`, `checkpoint`, `close`, `detach`
   and the first page of `grep`.
@@ -20,8 +20,11 @@ The short version is in the [README](../README.md#what-it-does-not-capture).
   start (duplicate entries); if it rewrites it at the same or greater length, new lines can be missed.
 - Two captures of one session at the same moment (for example parallel subagents each running a
   `thread` command) can store the same lines more than once.
-- Subagent results come back to the session as user lines; they are logged with the entry type
-  `subagent`. Slash commands you type and their local output are logged as `user` entries.
+- A subagent's finishing notice and the report it hands back are logged with the entry type
+  `subagent`; a background shell's notice as `notification`; Claude Code's own summary at a
+  compaction as `compaction`. Slash commands you type and their local output are `user` entries.
+- When Claude Code writes the same transcript line twice, one copy is kept, but only within one
+  capture run.
 - Thinking is stored only when the transcript holds its text. Current Claude Code leaves most
   thinking blocks empty.
 - `thread grep` and `thread open` clip what they print (400 and 600 characters per line or entry).
@@ -39,9 +42,10 @@ The short version is in the [README](../README.md#what-it-does-not-capture).
   file path. The log gets what the transcript holds, so it has only the preview, and Claude Code
   deletes the file it points to after 30 days by default.
 - `thread grep` calls and their output are stored but never searched, because the output only
-  repeats the log. This applies to any shell command that runs `thread grep`, alone or chained
-  (`cd x && thread grep y`), so other output of that command cannot be found by a search either. A
-  command that only mentions the words (a commit message) is not affected.
+  repeats the log. This applies to any Bash or PowerShell command that runs `thread grep`, alone or
+  chained (`cd x && thread grep y`), so other output of that command cannot be found by a search
+  either. A command that only mentions the words (a commit message, a heredoc body, a file being
+  written) is not affected.
 - Inside an entry, unusual line separators (form feed, U+2028, CR) are stored as newlines, and a
   body line that starts with `=== ` gains a leading space.
 - A resumed session keeps its id and its binding. A forked session (`--fork-session`, `/branch`)

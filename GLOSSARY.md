@@ -33,7 +33,7 @@ One record in the log.
 _Avoid_: Line, message, record
 
 **Entry type**:
-What an entry records: a user or assistant message, thinking, a tool call, a tool result, a subagent's result, a note, a checkpoint, or an event (the thread was created, closed or reopened, or capture skipped something).
+What an entry records: a user or assistant message, thinking, a tool call, a tool result, a subagent's report, a notification, a compaction summary written by Claude Code, a note, a checkpoint, or an event (the thread was created, closed or reopened, or capture skipped something).
 _Avoid_: Kind (a kind belongs to a thread), role
 
 **Capture**:

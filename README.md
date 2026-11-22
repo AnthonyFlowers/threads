@@ -6,11 +6,14 @@ a feature, an idea, a bug) that survive across sessions.
 The design follows GrepMem, ["Forget Freely, Grep Later"](https://arxiv.org/abs/2611.25123): keep an
 append-only plain-text log of the session, keep one summary in context, and recall details with
 case-insensitive regex search. No index, no embeddings, no database. The grep limits (10 matches per
-page, at most 30; 1 context line, at most 3; about 6,000 characters per page) are the paper's. Two
-things differ: the paper's agent writes its summary at every compaction and may grep only after the
-first one, while here the summary is a checkpoint the agent writes by hand and grep is always
-available. The paper tested one RL-trained model on single-episode benchmarks, not coding agents or
-work across sessions.
+page, at most 30; 1 context line, at most 3; about 6,000 characters per page) are the paper's, and
+so is the listing of matches grouped under their entry with merged context. The main differences:
+the paper's agent writes its summary at every compaction and may grep only after the first one,
+while here the summary is a checkpoint the agent writes by hand and grep is always available;
+matches are listed newest first (the paper: oldest first); and entry headers and tool-call inputs
+are searched as well as the text. The paper tested one 9B model, before and after RL training, on
+single-episode benchmarks, not coding agents or work across sessions. `docs/LOG.md` has a
+mechanism-by-mechanism comparison and a recall test on real transcripts.
 
 - One Python 3 file, standard library only, no network access.
 - All data in `~/.threads/` (directories mode 0700, files 0600), never in a repository.
@@ -21,8 +24,9 @@ work across sessions.
 - `thread new` or `thread open` binds the current Claude Code session to a thread.
 - Hooks append the session transcript to that thread's `log.txt`: user and assistant messages,
   thinking, tool calls and tool results, as the transcript holds them and with nothing cut by this
-  tool. Images are logged as `[image]`. Lines that Claude Code injects (system lines, attachments,
-  skill instructions, reminders, its own compaction summary) are not captured. See
+  tool. Reports handed back by subagents and Claude Code's own compaction summaries are logged
+  under their own entry types. Images are logged as `[image]`. Lines that Claude Code injects
+  (system lines, attachments, skill instructions, reminders) are not captured. See
   [docs/LIMITS.md](docs/LIMITS.md) for the exceptions.
 - The agent writes notes and, at milestones, a checkpoint that replaces `summary.md`.
 - A later session runs `thread open`, reads the summary, and uses `thread grep` for the details.
@@ -179,7 +183,7 @@ captures by itself and would hide a missing hook.
 | `thread open <id>` | Print the summary and what came after the last checkpoint; bind this session, capturing from now on. A closed thread is shown read-only. A unique id prefix is enough. |
 | `thread note <text>` | Append a note (text as arguments or on stdin). Prints how many entries are newer than the last checkpoint. |
 | `thread checkpoint` | Replace the summary (text as arguments or on stdin). Warns above 6000 characters, the amount re-injected after a compaction. |
-| `thread grep <regex>` | Case-insensitive search of the log, newest match first. `--count`, `--max N` (10, max 30), `--offset N`, `--context N` (1, max 3), `--type user,assistant,note` to search only those entry types, `--all` for every thread. A page ends early at about 6000 characters; the footer gives the `--offset` of the first match not shown. Context lines stay inside the matching entry. Printed lines are clipped to 400 characters. Earlier `thread grep` calls are not searched. Options go before a `--`. |
+| `thread grep <regex>` | Case-insensitive search of the log, newest entry first (`--oldest` reverses). Matches are grouped under their entry's header; a result's header also shows the call that produced it. `--count` prints the total, then a breakdown by entry type (and by thread with `--all`). `--max N` (10, max 30), `--offset N`, `--context N` (1, max 3), `--type user,assistant,note` to search only those entry types, `--all` for every thread. A page ends early at about 6000 characters; the footer gives the `--offset` of the first match not shown. Context lines stay inside the matching entry. Printed lines are clipped to 400 characters. Earlier `thread grep` calls are not searched. Options go before a `--`. |
 | `thread detach` | Stop capturing this session. |
 | `thread close` | Close with a final summary (arguments or stdin). The log is kept. |
 | `thread reopen <id>` | Reopen a closed thread and bind this session. Fails on an open thread. |
@@ -219,8 +223,8 @@ thread, so text from one piece of work can reach a session working on another.
 - Sessions with no active thread. Every new session, `/clear` and fork starts that way; a hook
   line says so when open threads exist for the folder.
 - What a session did before `thread open`. Only `thread new` claims the session so far.
-- Subagents' internal steps, images, most thinking, and very large tool outputs (Claude Code keeps
-  only a preview of those in its transcript).
+- Subagents' internal steps (their final reports are captured), images, most thinking, and very
+  large tool outputs (Claude Code keeps only a preview of those in its transcript).
 - An interrupted or killed turn, until the same session is used again.
 - Anything Claude Code changes in its undocumented transcript format without notice.
 

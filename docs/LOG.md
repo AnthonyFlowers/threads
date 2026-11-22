@@ -60,14 +60,30 @@
   - `thread grep --type`, newest match first, subagent results as entry type `subagent`.
   - Skill: "continue X" counts as asking to open; the agent may offer a thread once.
   - README shortened: limits and "Not in v1" moved to `docs/LIMITS.md`. Tests 26 -> 27.
+- 2026-11-22: Methods compared with the paper by two subagents (the owner does not want strict
+  conformance). Mechanism review: keep ours for always-available grep, the manual checkpoint,
+  timestamps, `--type`, `--all`, no timeout. Hands-on test, 41 recall questions over four real
+  transcripts, same regex for both greps: answer on page 1 for 27 (ours) against 21 (the paper's
+  reference grep on a paper-format log); never found within 5 pages 7 against 14. Eight of the
+  paper's misses were answers that exist only in tool-call input; newest-first alone moved five
+  questions from page 3 to page 1. The questions were written with the logs in view, single sessions.
+  - Borrowed from the paper: matches grouped under their entry in line order with merged context;
+    the producing call shown on a result's header; counts broken down by entry type and by thread.
+  - Owner decisions: subagent reports are captured (entry type `subagent`); Claude Code's
+    compaction summary is logged (entry type `compaction`).
+  - Fixed: reports were dropped by the injected-line rule; the own-grep rule hid Write calls and
+    heredocs that only mention `thread grep`; replayed transcript lines were stored twice;
+    background shell notices were labelled `subagent` (now `notification`). Added `--oldest`.
+    Tests 27 -> 28.
 
 ## Research notes
 
 - Source: arXiv 2611.25123v1, "Forget Freely, Grep Later" (GrepMem). Taken from it: append-only log
   written by the harness, a summary that is also appended to the log, case-insensitive regex recall
-  over log lines, oldest first, 10 matches per page (max 30), 1 context line (max 3), count mode, each
+  over log lines, 10 matches per page (max 30), 1 context line (max 3), count mode, each
   response capped at 6K characters and ending at a whole match with the offset for the next page,
-  context kept inside one record, earlier grep output left out of searches, and a note after
+  context kept inside one record and merged where it overlaps, matches grouped under their record's
+  header and labelled with the call that produced them, a count broken down by source, earlier grep output left out of searches, and a note after
   compaction that the history is searchable.
 - Differs from the paper: the paper's summary is written by the model at every automatic compaction
   (threshold 28,672 of a 32,768-token window) under a fixed prompt (key findings with their sources;
@@ -75,16 +91,20 @@
   next steps), and the context is reset to system prompt + task + that summary. Our checkpoint is
   manual, has its own template, and is what the hook re-injects, so it can be stale (the hook says how
   many entries are newer). The paper enables grep only after the first compaction; ours is always
-  available. The paper clips lines to 300 characters (ours 400), stops a search after 10 s (ours has
-  no timeout), starts every result with the match count by source, labels each match with its tool
-  call and arguments, and merges overlapping context. The 6,000-character limit on the re-injected
+  available. The paper lists matches oldest first; ours newest first (`--oldest` reverses). The paper searches
+  only record text; ours also searches headers and tool-call inputs. The paper clips lines to 300
+  characters (ours 400) and stops a search after 10 s (ours has no timeout). The 6,000-character limit on the re-injected
   summary is ours, not the paper's.
 - The paper has no ablations. Its evidence is one RL-trained model (Qwen3.5-9B) on single-episode
-  benchmarks; before RL, GrepMem scored 75.0 on ContextBench Log Triage against 95.3 after.
+  benchmarks; before RL, GrepMem scored 75.0 on ContextBench Log Triage against 95.3 after, and
+  below summary-only SUPO on BCP-Multi (40.9 against 45.2) while far above it on exact recall (KV
+  93.9 against 10.9). Table 3 gives no intervals.
 - Checked 2026-11-22 against the full PDF (v1, 17 pages, appendices A-F) and the code at
-  github.com/limenlp/GrepMem commit b7e3744: the grep defaults above are correct. The parameter names
-  and "Python re" come from the code, not the paper. The reference code does not log the model's
-  reasoning and cuts tool outputs at 40,000 characters before logging. Our own design, not from the
+  github.com/limenlp/GrepMem commit b7e3744: the grep defaults above are correct. The parameter names are in the paper's
+  Appendix A; "Python re" appears only in the code. The reference code does not log the model's
+  reasoning, cuts tool outputs at 40,000 characters before logging, does not log the system prompt
+  (Algorithm 1 says it does), does not search record headers, applies the 10 s limit only when the
+  `regex` package is installed, and keeps the log in memory for one episode. Our own design, not from the
   paper: threads, kinds, open/closed, binding sessions to threads, backfill, notes, export.
 - Claude Code facts used: `CLAUDE_CODE_SESSION_ID` is set for Bash, PowerShell and hook commands (documented on the env-vars
   page; changes on `/clear`);

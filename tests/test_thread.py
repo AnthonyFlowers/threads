@@ -135,7 +135,7 @@ class Case(unittest.TestCase):
         self.assertEqual(sum(1 for e in thread.entries("a") if e[3] == "note"), 13)  # fake header escaped
         self.run_cli("new", "B")
         self.assertEqual(self.run_cli("grep", "needle", "--count").strip(), "0")
-        self.assertEqual(self.run_cli("grep", "needle", "--count", "--all").strip(), "12")
+        self.assertEqual(self.run_cli("grep", "needle", "--count", "--all"), "12\n[by thread: a 12]\n")
         self.assertLessEqual(len(self.run_cli("grep", ".", "--all", "--max", "30")), thread.CAP + 200)
 
     def test_hook_reinjects_after_compaction_and_never_raises(self):
@@ -170,7 +170,7 @@ class Case(unittest.TestCase):
         while True:
             page = self.run_cli("grep", "needle", "--offset", str(offset))
             self.assertLessEqual(len(page), thread.CAP + 200)
-            seen += [l for l in page.splitlines() if l.startswith("> ")]
+            seen += [re.sub(r"^> \d+: ", "> ", l) for l in page.splitlines() if l.startswith("> ")]
             nxt = page.rsplit("--offset ", 1)
             if len(nxt) == 1:
                 break
@@ -222,7 +222,7 @@ class Case(unittest.TestCase):
         while pages < 10:
             pages += 1
             page = self.run_cli("grep", "needle item", "--all", "--offset", str(offset))
-            seen += re.findall(r"^> (needle item\d+)$", page, re.M)
+            seen += re.findall(r"^> \d+: (needle item\d+)$", page, re.M)
             # the call and its output land in the transcript, and a hook captures them
             self.say(msg("assistant", [{"type": "tool_use", "id": f"t{pages}", "name": "Bash", "input":
                          {"command": f'thread grep "needle item" --all --offset {offset}'}}]),
@@ -234,7 +234,7 @@ class Case(unittest.TestCase):
             offset = int(nxt[1])
         self.assertEqual(seen, [f"needle item{i:03d}" for i in reversed(range(25))])
         self.assertLess(pages, 10)  # the footer stops offering pages
-        self.assertIn("> needle item000", self.log("aaa"))  # calls and output are logged, not searched
+        self.assertRegex(self.log("aaa"), r"> \d+: needle item000")  # calls and output are logged, not searched
 
     def test_only_new_backfills_and_a_fork_starts_at_the_fork(self):
         self.say(msg("user", "parent line"))
@@ -284,9 +284,14 @@ class Case(unittest.TestCase):
         hit = self.run_cli("grep", 'pytest -k "batch', "--context", "0")
         self.assertIn(" tool_use Bash t1 ===", hit)  # the command is found as typed
         self.assertIn("[matches 1-1 of 1]", self.run_cli("grep", r"C:\\work\\app\\batch\.py"))
-        self.assertEqual(self.run_cli("grep", "batch", "--count").strip(), "3")
+        self.assertEqual(self.run_cli("grep", "batch", "--count"),
+                         "3\n[by type: user 1, tool_use 1, tool_result 1]\n")
+        self.assertIn(" tool_result t1 ===  <- Bash: command: pytest -k", self.run_cli("grep", "def batch_50"))
         self.assertEqual(self.run_cli("grep", "batch", "--count", "--type", "user,note").strip(), "1")
-        self.assertIn("> we decided", self.run_cli("grep", "batch", "--type", "user"))
+        self.assertRegex(self.run_cli("grep", "batch", "--type", "user"), r"\n> \d+: we decided")
+        older = self.run_cli("grep", "batch", "--oldest", "--context", "0")
+        self.assertLess(older.index("we decided"), older.index("def batch_50"))
+        self.assertIn("[by type: ", older)
         # newest first, across threads
         self.run_cli("new", "B")
         self.run_cli("note", "batch again, later, in another thread")
@@ -359,7 +364,8 @@ class Case(unittest.TestCase):
         page = self.run_cli("grep", "needle", "--max", "99", "--context", "9")
         first = page.split("\n--\n")[0].splitlines()
         self.assertEqual(len(first), 1 + 7)  # location line + match with 3 lines either side
-        self.assertEqual(first[1:4] + first[5:], [f"  b{n} 39" for n in (2, 3, 4, 0, 1, 2)])
+        self.assertEqual([re.sub(r"^  \d+: ", "", l) for l in first[1:4] + first[5:]],
+                         [f"b{n} 39" for n in (2, 3, 4, 0, 1, 2)])
         hit = next(l for l in first if l.startswith("> "))
         self.assertIn("needle 39", hit)
         self.assertLess(len(hit), 500)
@@ -415,7 +421,16 @@ class Case(unittest.TestCase):
                                    {"type": "tool_use", "id": "u1", "name": "Ba\nsh x", "input": {"a": 1}}]),
                  msg("user", [{"type": "tool_result", "tool_use_id": "u1",
                                "content": [{"type": "text", "text": "ok"}, {"type": "image"}]}]),
-                 msg("user", "<task-notification>agent 7 finished</task-notification>"),
+                 msg("user", "<task-notification>agent 7 <subagent_tokens>5</subagent_tokens></task-notification>"),
+                 msg("user", "<task-notification>background shell exited</task-notification>"),
+                 msg("user", "Another Claude session sent a message:\n<agent-message>report A</agent-message>",
+                     isMeta=True, uuid="u-1"),
+                 msg("user", "Another Claude session sent a message:\n<agent-message>report A</agent-message>",
+                     isMeta=True, uuid="u-1"),  # written twice by Claude Code: one copy is kept
+                 json.dumps({"type": "attachment", "sessionId": SID, "attachment":
+                             {"type": "queued_command", "prompt": "<agent-message from=x>report B</agent-message>"}}) + "\n",
+                 json.dumps({"type": "attachment", "sessionId": SID, "attachment":
+                             {"type": "queued_command", "prompt": "<task-notification>dup</task-notification>"}}) + "\n",
                  msg("user", "injected skill body", isMeta=True),
                  json.dumps({"type": "system", "content": "system line"}) + "\n",
                  json.dumps({"type": "attachment", "attachment": "attached"}) + "\n",
@@ -423,7 +438,9 @@ class Case(unittest.TestCase):
                  msg("user", "other id").replace(SID, long_sid))
         self.hook()
         log = self.log("a")
-        self.assertEqual(self.kinds("a"), ["event", "user", "thinking", "tool_use", "tool_result", "subagent", "user"])
+        self.assertEqual(self.kinds("a"), ["event", "user", "thinking", "tool_use", "tool_result", "subagent", "notification", "subagent",
+                          "subagent", "user"])
+        self.assertEqual((log.count("report A"), log.count("report B"), log.count(">dup<")), (1, 1, 0))
         self.assertIn("\n === 2026-01-01T00:00:00Z abcdefgh note ===\n", log)  # escaped, not an entry
         self.assertIn(" tool_use Ba_sh_x u1 ===\na: 1\n=== 2026-01-01T00:00:00.000Z sess-1 tool_result u1 ===", log)
         self.assertIn("ok\n[image]\n", log)
@@ -464,7 +481,7 @@ class Case(unittest.TestCase):
             self.run_cli("note", f"line {i}")
         page = self.run_cli("grep", "line 7$").splitlines()
         self.assertRegex(page[0], r"^a:\d+  === \S+ sess-1 note ===$")
-        self.assertEqual(int(page[0].split()[0][2:]), self.log("a").splitlines().index("line 7") + 1)
+        self.assertEqual(page[1], f"> {self.log('a').splitlines().index('line 7') + 1}: line 7")
         self.assertEqual(len(page), 3)  # location, the match, footer: context stays inside the entry
         self.assertEqual(self.run_cli("grep", "^line", "--max", "99", "--context", "0").count("\n> "), 30)
         self.assertIn("[matches 1-30 of 41; next page: --offset 30]",
@@ -587,7 +604,7 @@ class Case(unittest.TestCase):
             self.assertNotIn("\x1b", out)
         self.say(msg("user", "Claude Code's own compaction summary", isCompactSummary=True))
         self.hook()
-        self.assertNotIn("own compaction summary", self.log("b"))
+        self.assertIn(" compaction ===\nClaude Code's own compaction summary\n", self.log("b"))
         self.assertNotIn("errors.log", self.run_cli("list"))
         self.run_cli("hook", stdin="x")
         self.assertIn("hook errors are recorded in", self.run_cli("list"))
@@ -597,6 +614,22 @@ class Case(unittest.TestCase):
                 thread.read_text([])
         finally:
             sys.stdin = old
+
+    def test_grep_groups_an_entry_and_only_real_grep_calls_are_left_out(self):
+        self.run_cli("new", "A")
+        self.run_cli("note", stdin="alpha hit\nx1\nbeta hit\nx2\nx3\nx4\nx5\ngamma hit\n")
+        page = self.run_cli("grep", "hit").splitlines()
+        self.assertRegex(page[0], r"^a:3  === \S+ sess-1 note ===$")  # one header for the entry
+        self.assertEqual([re.sub(r"\d+: ", "", l) for l in page[1:-1]],
+                         ["> alpha hit", "  x1", "> beta hit", "  x2", "  --", "  x5", "> gamma hit"])
+        self.assertEqual(page[-1], "[matches 1-3 of 3]")
+        use = lambda i, tool, inp: msg("assistant", [{"type": "tool_use", "id": i, "name": tool, "input": inp}])
+        res = lambda i, t: msg("user", [{"type": "tool_result", "tool_use_id": i, "content": t}])
+        self.say(use("w1", "Write", {"file_path": "a.py", "content": 'run("thread grep foo")'}), res("w1", "wrote Zed1"),
+                 use("h1", "Bash", {"command": "cat > notes <<'EOF'\nthread grep 'x'\nEOF\necho Zed2"}), res("h1", "Zed2"),
+                 use("g1", "Bash", {"command": "cd /r && thread grep Zed"}), res("g1", "a:9 Zed3"))
+        self.hook()
+        self.assertEqual(self.run_cli("grep", "Zed", "--count").splitlines()[0], "3")  # Zed1 and Zed2 (twice)
 
     def test_printed_details(self):
         self.run_cli("new", "A")
@@ -614,7 +647,7 @@ class Case(unittest.TestCase):
         self.assertIn("* a  -  open", self.run_cli("list"))  # `open a` made it active
         page = self.run_cli("grep", "needle", "--context", "0", "-t", "b").splitlines()
         self.assertEqual(len(page), 3)  # location, the match alone, footer
-        self.assertEqual(page[1], "> …" + "p" * 149 + " needle " + "q" * 243 + "…")
+        self.assertEqual(page[1], "> 6: …" + "p" * 149 + " needle " + "q" * 243 + "…")
         self.assertEqual(self.run_cli("grep", "^created", "--context", "3", "-t", "a").count("created: A"), 1)
         self.assertNotIn("cut at", self.hook("SessionStart"))
         self.run_cli("checkpoint", stdin="S" * (thread.CAP + 1))

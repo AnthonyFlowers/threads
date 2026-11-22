@@ -220,7 +220,10 @@ def tool_input(inp):
                      for k, v in inp.items())
 
 
-def render(line, own=None, since=None):
+REPORT = ("Another Claude session sent a message", "<agent-message", "<cross-session-message")
+
+
+def render(line, own=None, since=None, seen=None):
     """One transcript JSONL line -> log entries. Raises on a line it cannot read.
 
     `own` is the session being captured; lines that carry another session's id belong to that
@@ -233,11 +236,20 @@ def render(line, own=None, since=None):
     if not line.strip():
         return ""
     d = json.loads(line)
-    if not isinstance(d, dict) or d.get("type") not in ("user", "assistant") or d.get("isSidechain"):
+    if not isinstance(d, dict) or d.get("isSidechain"):
         return ""
-    if d.get("isMeta") or d.get("isCompactSummary"):
-        return ""  # injected by Claude Code (skill bodies, reminders, its compaction summary)
+    if seen is not None and d.get("uuid"):
+        if d["uuid"] in seen:
+            return ""  # Claude Code sometimes writes a line again; one copy is enough
+        seen.add(d["uuid"])
     if own and d.get("sessionId") and d["sessionId"] != own:
+        return ""
+    if d.get("type") == "attachment":  # a queued message from another agent is delivered this way
+        prompt = (d.get("attachment") or {}).get("prompt") if isinstance(d.get("attachment"), dict) else None
+        if not (isinstance(prompt, str) and prompt.lstrip().startswith(REPORT)):
+            return ""
+        d = {**d, "type": "user", "message": {"content": prompt}}
+    if d.get("type") not in ("user", "assistant"):
         return ""
     ts, sid, role = "".join(str(d.get("timestamp") or now()).split()), d.get("sessionId"), d["type"]
     if since and d.get("timestamp") and ts[:19] < since[:19]:
@@ -252,8 +264,16 @@ def render(line, own=None, since=None):
         t = b.get("type")
         if t == "text":
             text = b.get("text", "")
-            # a subagent's result comes back as a user line; the user did not say it
-            kind = "subagent" if role == "user" and text.lstrip().startswith("<task-notification>") else role
+            start, kind = text.lstrip(), role
+            if role == "user":  # not everything on a user line was said by the user
+                if d.get("isCompactSummary"):
+                    kind = "compaction"  # Claude Code's own summary at a compaction
+                elif start.startswith(REPORT):
+                    kind = "subagent"  # a report handed back by another agent
+                elif start.startswith("<task-notification>"):
+                    kind = "subagent" if "<subagent_tokens>" in text else "notification"
+                elif d.get("isMeta"):
+                    continue  # injected by Claude Code: skill bodies, reminders
             out.append(entry(ts, sid, kind, text))
         elif t == "thinking":
             if b.get("thinking"):
@@ -286,10 +306,10 @@ def capture(sid, tpath=None):
         first = st.get("offset", 0)
         if not isinstance(first, int) or not 0 <= first <= len(lines):
             first = 0  # the transcript was replaced by a shorter one, or the state is damaged
-        parts = []
+        parts, seen = [], set()
         for n, line in enumerate(lines[first:] if tid else [], first + 1):
             try:
-                parts.append(render(line, sid, st.get("since")))
+                parts.append(render(line, sid, st.get("since"), seen))
             except Exception as e:  # an unknown line shape must not block the lines after it
                 parts.append(entry(now(), sid, "event",
                                    f"capture skipped transcript line {n}: {type(e).__name__}"))
@@ -505,6 +525,9 @@ def clip(line, start=0):
     return ("…" if s else "") + line[s:s + 400] + "…"
 
 
+HEREDOC = re.compile(r"<<-?\s*['\"]?(\w+)['\"]?[^\n]*\n.*?\n\s*\1\b", re.S)
+
+
 def cmd_grep(a):
     try:
         rx = re.compile(a.pattern, re.I)
@@ -514,9 +537,10 @@ def cmd_grep(a):
         die("use --all or -t, not both")
     if a.offset <= 0:
         try_capture(session_id())  # page 1 sees the turn in progress; later pages need a stable log
-    hits, total = [], 0  # hits: (entry time, tid, lineno, header, [context lines])
     types = {t for t in (a.type or "").replace(",", " ").split()}
     ctx = min(max(a.context, 0), 3)
+    hits = []  # (entry time, thread, entry line, line, header, {line: text} with context)
+    by_type, by_thread = {}, {}
     for tid in (all_ids() if a.all else [target(a)]):
         p = home() / tid / "log.txt"
         if not p.exists():
@@ -524,51 +548,91 @@ def cmd_grep(a):
         # shortcut: reads the whole log into memory; stream it if logs reach hundreds of MB
         lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
         heads = [bool(HDR.match(l)) for l in lines]
-        head, skip, own_ids = "", False, set()
+        head, start, kind, skip, calls, own_ids = "", 0, "", False, {}, set()
         for i, line in enumerate(lines):
             if heads[i]:
-                head, f = line, line.split()
-                skip = bool(types) and f[3] not in types
-                if f[3] == "tool_use":
-                    # an earlier `thread grep` call holds its own pattern, and its result repeats
-                    # the log: searching them would make the match count grow with every page
+                f = line.split()
+                head, start, kind = line, i, f[3]
+                skip = bool(types) and kind not in types
+                if kind == "tool_use":
                     j = i + 1
                     while j < len(lines) and not heads[j]:
                         j += 1
-                    body = "\n".join(lines[i + 1:j])
-                    if GREP_CALL.search(body[9:] if body.startswith("command: ") else body):
+                    calls[f[-2]] = f"{f[4]}: {clip(lines[i + 1] if j > i + 1 else '')[:160]}"
+                    cmd = "\n".join(lines[i + 1:j])
+                    cmd = cmd[9:] if cmd.startswith("command: ") else ""
+                    # an earlier `thread grep` call holds its own pattern, and its result repeats
+                    # the log: searching them would make the match count grow with every page
+                    if f[4] in ("Bash", "PowerShell") and GREP_CALL.search(HEREDOC.sub("", cmd)):
                         own_ids.add(f[-2])
-                if f[3] in ("tool_use", "tool_result") and f[-2] in own_ids:
+                if kind in ("tool_use", "tool_result") and f[-2] in own_ids:
                     skip = True
+                if kind == "tool_result" and f[-2] in calls:
+                    head = f"{line}  <- {calls[f[-2]]}"  # which call printed this
             m = None if skip else rx.search(line)
-            if m and a.count:
-                total += 1
-            elif m:
-                lo = hi = i  # context stays inside the entry: a neighbour's text is not this match's
-                while i - lo < ctx and lo > 0 and not heads[lo] and not heads[lo - 1]:
-                    lo -= 1
-                while hi - i < ctx and hi + 1 < len(lines) and not heads[hi + 1]:
-                    hi += 1
-                block = [("> " if j == i else "  ") + clip(lines[j], m.start() if j == i else 0)
-                         for j in range(lo, hi + 1)]
-                hits.append((head.split()[1][:19] if head else "", tid, i + 1, head, block))
+            if not m:
+                continue
+            by_type[kind] = by_type.get(kind, 0) + 1
+            by_thread[tid] = by_thread.get(tid, 0) + 1
+            if a.count:
+                continue
+            lo = hi = i  # context stays inside the entry: a neighbour's text is not this match's
+            while i - lo < ctx and lo > start + 1:
+                lo -= 1
+            while hi - i < ctx and hi + 1 < len(lines) and not heads[hi + 1]:
+                hi += 1
+            near = {j + 1: clip(lines[j], m.start() if j == i else 0) for j in range(lo, hi + 1) if j > start}
+            hits.append((head.split()[1][:19] if head else "", tid, start + 1, i + 1, head, near))
+    total = sum(by_type.values())
+    spread = lambda d: ", ".join(f"{k} {v}" for k, v in sorted(d.items(), key=lambda kv: -kv[1]))
+    extra = ([f"[by type: {spread(by_type)}]"] if len(by_type) > 1 else []) + \
+            ([f"[by thread: {spread(by_thread)}]"] if a.all and by_thread else [])
     if a.count:
-        print(total)
+        print("\n".join([str(total)] + extra))
         return
-    hits.sort(key=lambda h: h[:3], reverse=True)  # newest first: a later decision replaces an earlier one
-    start, size = max(a.offset, 0), min(max(a.max, 1), 30)
-    out, used = [], 0
-    for _, tid, n, head, block in hits[start:start + size]:
-        piece = f"{tid}:{n}  {head}\n" + "\n".join(block)
-        if out and used + len(piece) > CAP:
+    # newest entry first (a later decision replaces an earlier one); inside an entry, top to bottom
+    hits.sort(key=lambda h: (h[0], h[1], h[2]), reverse=not a.oldest)
+    hits = [h for _, group in _grouped(hits) for h in sorted(group, key=lambda h: h[3])]
+    first, size = max(a.offset, 0), min(max(a.max, 1), 30)
+    shown, text = 0, ""
+    for n in range(1, len(hits[first:first + size]) + 1):
+        trial = _page(hits[first:first + n])
+        if shown and len(trial) > CAP:
             break  # the page ends early; the footer points at the first match not shown
-        out.append(piece)
-        used += len(piece) + 4
-    if out:
-        print("\n--\n".join(out))
-    end = start + len(out)
-    more = f"; next page: --offset {end}" if end < len(hits) else ""
-    print(f"[matches {start + 1 if out else 0}-{end if out else 0} of {len(hits)}{more}]")
+        shown, text = n, trial
+    if text:
+        print(text)
+    end = first + shown
+    more = f"; next page: --offset {end}" if end < total else ""
+    print("\n".join([f"[matches {first + 1 if shown else 0}-{end if shown else 0} of {total}{more}]"] + extra))
+
+
+def _grouped(hits):
+    """Consecutive hits of the same entry, as (key, [hits])."""
+    out = []
+    for h in hits:
+        if out and out[-1][0] == h[1:3]:
+            out[-1][1].append(h)
+        else:
+            out.append((h[1:3], [h]))
+    return out
+
+
+def _page(hits):
+    """One header per entry, its matching lines in order with merged context (as in the paper)."""
+    blocks = []
+    for (tid, start), group in _grouped(hits):
+        near, marked = {}, {h[3] for h in group}
+        for h in group:
+            near.update(h[5])
+        rows, last = [f"{tid}:{start}  {group[0][4]}"], None
+        for n in sorted(near):
+            if last is not None and n > last + 1:
+                rows.append("  --")
+            rows.append(f"{'>' if n in marked else ' '} {n}: {near[n]}")
+            last = n
+        blocks.append("\n".join(rows))
+    return "\n--\n".join(blocks)
 
 
 def cmd_list(a):
@@ -684,6 +748,7 @@ def main(argv=None):
     s.add_argument("--offset", type=int, default=0, help="skip this many matches")
     s.add_argument("--context", type=int, default=1, help="context lines (default 1, max 3)")
     s.add_argument("--type", help="search only these entry types, e.g. user,assistant,note")
+    s.add_argument("--oldest", action="store_true", help="list the oldest matches first")
     s = cmd("list", cmd_list, "list open threads")
     s.add_argument("--all", action="store_true", help="include closed threads")
     s.add_argument("--kind")
