@@ -24,6 +24,15 @@
   recorded; home directory mode; SessionEnd timeout 10 s; install check redone so it fails without
   hooks. Tests 9 -> 17, including the hook and CLI as subprocesses. A reviewer's mutation run had
   22 of 26 mutants survive the 9-test suite; not re-run against the new suite.
+- 2026-11-22: Third review by two fresh subagents at 0d17324; no high-severity finding. Owner decision:
+  lines Claude Code injects (`isMeta`) are not captured. Fixed: grep-call detection limited to command
+  position; `--all` back to id order, with earlier grep calls left out of searches (so paging cannot
+  feed itself); bindings carry the thread's generation (uid + close count), so close+reopen or
+  remove+recreate elsewhere detaches; no-text commands stop after 5 s on an open pipe; wrong-shape
+  state/meta files; summary cut marker; Windows wrapper must not exit 2. Tests 17 -> 25.
+  Own mutation check (150 single-token mutants, script not kept in the repo): 110 killed; of the 40
+  survivors most change only message text or nothing observable. Known untested: the 5 s stdin wait
+  (checked by hand), `grep --all` over a thread with no log file.
 
 ## Research notes
 
@@ -35,6 +44,7 @@
   backfill, notes, export.
 - Read only through a fetch agent; the grep parameter defaults come from a model-written summary of
   the second half of the paper and were not checked against the PDF.
-- Claude Code facts used: `CLAUDE_CODE_SESSION_ID` is set for Bash commands (seen in 2.1.316);
+- Claude Code facts used: `CLAUDE_CODE_SESSION_ID` is set for Bash, PowerShell and hook commands (documented on the env-vars
+  page; changes on `/clear`);
   transcripts are `~/.claude/projects/<dir>/<session>.jsonl` with `type` user/assistant and
   `message.content` blocks (text, thinking, tool_use, tool_result).

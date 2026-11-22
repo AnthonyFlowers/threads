@@ -37,7 +37,7 @@ def write(path, text):
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")  # unique, so parallel writers cannot collide
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
+    with os.fdopen(fd, "w", encoding="utf-8", errors="replace") as f:
         f.write(text)
     os.replace(tmp, path)
 
@@ -85,8 +85,15 @@ def resolve(ref):
 def is_open(tid):
     try:
         return meta(tid)["status"] == "open"
-    except (OSError, ValueError, KeyError):
+    except (OSError, ValueError, KeyError, TypeError):
         return False  # removed or unreadable
+
+
+def generation(tid):
+    """Changes when a thread is closed or replaced by a new one of the same id, so a session
+    bound before that is not captured into what came after."""
+    m = meta(tid)
+    return f"{m.get('uid')}/{m.get('closes', 0)}"
 
 
 def summary(tid):
@@ -128,14 +135,22 @@ def state_path(sid):
 def state(sid):
     p = state_path(sid)
     try:
-        return json.loads(p.read_text()) if p and p.exists() else None
+        st = json.loads(p.read_text()) if p and p.exists() else None
     except ValueError:
-        return None  # corrupt state file: start over rather than crash every command
+        st = None
+    return st if isinstance(st, dict) else None  # corrupt state file: start over, do not crash
+
+
+def bound(st):
+    """The thread a session state is validly bound to, or None."""
+    tid = (st or {}).get("thread")
+    if isinstance(tid, str) and is_open(tid) and st.get("gen") == generation(tid):
+        return tid
+    return None  # detached, or the thread was closed or removed since this session bound to it
 
 
 def active(sid):
-    tid = (state(sid) or {}).get("thread")
-    return tid if tid and is_open(tid) else None  # a thread closed or removed elsewhere is not active
+    return bound(state(sid))
 
 
 def find_transcript(sid):
@@ -154,7 +169,10 @@ def flat(content):
     return "\n".join(out)
 
 
-GREP_CALL = re.compile(r"\bthread(\.py)?[\"']?\s+grep\b")
+# `thread grep` in command position: at the start of a line or after ; & | ( and, optionally,
+# VAR=value assignments, a python launcher and a path. A mere mention in an argument does not count.
+GREP_CALL = re.compile(r"""(?m)(?:^|[;&|(])\s*(?:\w+=\S*\s+)*(?:\S*py\S*\s+)?["']?(?:\S*[/\\])?"""
+                       r"""thread(?:\.py|\.cmd)?["']?\s+grep\b""")
 GREP_MARK = "[output of `thread grep` not stored: it only repeats this log]"
 
 
@@ -173,10 +191,12 @@ def render(line, own=None, greps=None):
     d = json.loads(line)
     if not isinstance(d, dict) or d.get("type") not in ("user", "assistant") or d.get("isSidechain"):
         return ""
+    if d.get("isMeta"):
+        return ""  # injected by Claude Code (skill bodies, reminders), not said by anyone
     if own and d.get("sessionId") and d["sessionId"] != own:
         return ""
     greps = [] if greps is None else greps
-    ts, sid, role = d.get("timestamp") or now(), d.get("sessionId"), d["type"]
+    ts, sid, role = "".join(str(d.get("timestamp") or now()).split()), d.get("sessionId"), d["type"]
     content = (d.get("message") or {}).get("content")
     if isinstance(content, str):
         content = [{"type": "text", "text": content}]
@@ -192,10 +212,11 @@ def render(line, own=None, greps=None):
                 out.append(entry(ts, sid, "thinking", b["thinking"]))
         elif t == "tool_use":
             inp = b.get("input")
-            if isinstance(inp, dict) and GREP_CALL.search(str(inp.get("command", ""))):
-                greps.append(b.get("id"))
+            if isinstance(inp, dict) and b.get("id") and GREP_CALL.search(str(inp.get("command", ""))):
+                greps.append(b["id"])
+                del greps[:-50]  # calls that never got a result must not pile up
             out.append(entry(ts, sid, "tool_use", json.dumps(inp, ensure_ascii=False),
-                             str(b.get("name", "")).replace("\n", " ")))
+                             " ".join(str(b.get("name", "")).split())))
         elif t == "tool_result":
             if b.get("tool_use_id") in greps:
                 greps.remove(b["tool_use_id"])
@@ -212,9 +233,7 @@ def capture(sid, tpath=None):
     st = state(sid)
     if not st:
         return
-    tid = st.get("thread")
-    if tid and not is_open(tid):
-        tid = st["thread"] = None  # closed by another session, or removed: stop capturing into it
+    tid = st["thread"] = bound(st)  # None also when it was closed or removed by another session
     tpath = tpath or find_transcript(sid)
     if tpath and os.path.exists(tpath):
         with open(tpath, encoding="utf-8", errors="replace") as f:
@@ -222,8 +241,8 @@ def capture(sid, tpath=None):
         if lines and not lines[-1].endswith("\n"):
             lines.pop()  # half-written line; take it next time
         first = st.get("offset", 0)
-        if first > len(lines):
-            first = 0  # the transcript was replaced by a shorter one
+        if not isinstance(first, int) or not 0 <= first <= len(lines):
+            first = 0  # the transcript was replaced by a shorter one, or the state is damaged
         parts, greps = [], st.setdefault("greps", [])
         for n, line in enumerate(lines[first:] if tid else [], first + 1):
             try:
@@ -254,7 +273,7 @@ def bind(sid, tid):
         return
     capture(sid)
     st = state(sid) or {"offset": 0}
-    st["thread"] = tid
+    st["thread"], st["gen"] = tid, generation(tid)
     write(state_path(sid), json.dumps(st))
     capture(sid)
 
@@ -278,8 +297,15 @@ def target(args):
 
 def read_text(parts):
     parts = parts[1:] if parts[:1] == ["--"] else parts
-    if not parts and sys.stdin.isatty():
-        die("no text: pass it as arguments or on stdin")
+    if not parts:
+        if sys.stdin.isatty():
+            die("no text: pass it as arguments or on stdin")
+        try:  # an agent's shell hands over an open pipe that never ends: do not wait on it forever
+            import select
+            if os.name == "posix" and not select.select([sys.stdin], [], [], 5)[0]:
+                die("no text arrived on stdin within 5 s: pass it as arguments or a heredoc")
+        except (ValueError, OSError, TypeError):
+            pass  # not a real file (tests), or select cannot watch it
     text = " ".join(parts) if parts else sys.stdin.read()
     if not text.strip():
         die("empty text")
@@ -320,7 +346,7 @@ def cmd_new(a):
         n += 1
         tid = f"{base}-{n}"
     save_meta({"id": tid, "title": title, "kind": a.kind or "", "status": "open",
-               "created": now(), "cwd": os.getcwd()})
+               "created": now(), "cwd": os.getcwd(), "uid": os.urandom(4).hex()})
     sid = session_id()
     bind(sid, tid)
     append(tid, entry(now(), sid, "event", f"created: {title}"))
@@ -338,6 +364,8 @@ def cmd_open(a):
 
 def cmd_reopen(a):
     tid = resolve(a.id)
+    if is_open(tid):
+        die(f"thread {tid} is already open; use `thread open {tid}`")
     sid = session_id()
     capture(sid)  # while it is still closed, so what a bound session did meanwhile stays out
     m = meta(tid)
@@ -359,12 +387,15 @@ def cmd_checkpoint(a, close=False):
     if not is_open(tid):
         die(f"thread {tid} is closed; only notes can be added. `thread reopen {tid}` first")
     try_capture(sid)
+    if len(text) > CAP:
+        print(f"thread: summary is {len(text)} characters; only the first {CAP} are re-injected "
+              f"after a compaction", file=sys.stderr)
     write(home() / tid / "summary.md", text + "\n")
     append(tid, entry(now(), sid, "checkpoint", text))
     if close:
         mine = active(sid) == tid
         m = meta(tid)
-        m["status"] = "closed"
+        m["status"], m["closes"] = "closed", m.get("closes", 0) + 1
         save_meta(m)
         append(tid, entry(now(), sid, "event", "closed"))
         if mine:
@@ -397,23 +428,30 @@ def cmd_grep(a):
         rx = re.compile(a.pattern, re.I)
     except re.error as e:
         die(f"bad regex: {e}")
-    cur = active(session_id())
+    if a.all and a.thread:
+        die("use --all or -t, not both")
     if a.offset <= 0:
         capture(session_id())  # page 1 sees the turn in progress; later pages need a stable log
     hits = []  # (tid, lineno, header, [context lines])
     ctx = min(max(a.context, 0), 3)
-    # the active thread goes last: it is the only one that grows between pages
-    for tid in (sorted(all_ids(), key=lambda t: t == cur) if a.all else [target(a)]):
+    for tid in (all_ids() if a.all else [target(a)]):
         p = home() / tid / "log.txt"
         if not p.exists():
             continue
         # shortcut: reads the whole log into memory; stream it if logs reach hundreds of MB
         lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
-        head = ""
+        head, own_call = "", False
         for i, line in enumerate(lines):
             if HDR.match(line):
-                head = line
-            m = rx.search(line)
+                head, own_call = line, False
+            elif head.split()[3:4] == ["tool_use"] and i and lines[i - 1] is head:
+                # an earlier `thread grep` call holds its own pattern: leaving it out keeps
+                # the match count from growing with every page
+                try:
+                    own_call = bool(GREP_CALL.search(str(json.loads(line).get("command", ""))))
+                except (ValueError, AttributeError):
+                    own_call = False
+            m = None if own_call else rx.search(line)
             if m:
                 block = [("> " if j == i else "  ") + clip(lines[j], m.start() if j == i else 0)
                          for j in range(max(0, i - ctx), min(len(lines), i + ctx + 1))]
@@ -442,13 +480,13 @@ def cmd_list(a):
     for tid in all_ids():
         try:
             m = meta(tid)
-        except (OSError, ValueError):
+            if (m["status"] == "open" or a.all) and (not a.kind or m["kind"] == a.kind):
+                log = home() / tid / "log.txt"
+                t = log.stat().st_mtime if log.exists() else 0
+                rows.append((t, f"{'*' if tid == cur else ' '} {tid}  {m['kind'] or '-'}  {m['status']}"
+                                f"  {time.strftime('%Y-%m-%d', time.localtime(t))}  {m['title']}"))
+        except (OSError, ValueError, KeyError, TypeError):
             continue  # unreadable meta.json: leave it out rather than fail the listing
-        if (m["status"] == "open" or a.all) and (not a.kind or m["kind"] == a.kind):
-            log = home() / tid / "log.txt"
-            t = log.stat().st_mtime if log.exists() else 0
-            rows.append((t, f"{'*' if tid == cur else ' '} {tid}  {m['kind'] or '-'}  {m['status']}  "
-                            f"{time.strftime('%Y-%m-%d', time.localtime(t))}  {m['title']}"))
     print("\n".join(r for _, r in sorted(rows, reverse=True)) or "(no threads)")
 
 
@@ -475,7 +513,9 @@ def cmd_hook(a):
             print(f"Active thread: {tid} ({meta(tid)['title']}). Details lost to compaction are in "
                   f"its log: run `thread grep <regex>` before re-deriving anything.\n\n"
                   # Claude Code keeps only a preview of hook output above 10,000 characters
-                  f"Thread summary:\n{summary(tid).strip()[:CAP] or '(no checkpoint yet)'}")
+                  f"Thread summary:\n{summary(tid).strip()[:CAP] or '(no checkpoint yet)'}"
+                  + (f"\n…[cut at {CAP} characters; `thread open {tid}` prints all of it]"
+                     if len(summary(tid).strip()) > CAP else ""))
     except Exception:
         try:
             home().mkdir(parents=True, exist_ok=True, mode=0o700)

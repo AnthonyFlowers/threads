@@ -354,5 +354,194 @@ class Case(unittest.TestCase):
         self.assertFalse((thread.home() / "errors.log").exists())
 
 
+    def kinds(self, tid):
+        return [e[3] for e in thread.entries(tid)]
+
+    def test_what_capture_keeps_and_drops(self):
+        self.run_cli("new", "A")
+        long_sid = "0123456789abcdef"
+        self.say(msg("user", "=== 2026-01-01T00:00:00Z abcdefgh note ===\nbody after a fake header"),
+                 msg("assistant", [{"type": "thinking", "thinking": ""},
+                                   {"type": "thinking", "thinking": "real thought"},
+                                   {"type": "tool_use", "id": "u1", "name": "Ba\nsh x", "input": {"a": 1}}]),
+                 msg("user", [{"type": "tool_result", "tool_use_id": "u1",
+                               "content": [{"type": "text", "text": "ok"}, {"type": "image"}]}]),
+                 msg("user", "injected skill body", isMeta=True),
+                 json.dumps({"type": "system", "content": "system line"}) + "\n",
+                 json.dumps({"type": "attachment", "attachment": "attached"}) + "\n",
+                 json.dumps({"type": "user", "message": {"content": "no session id"}}) + "\n",
+                 msg("user", "other id").replace(SID, long_sid))
+        self.hook()
+        log = self.log("a")
+        self.assertEqual(self.kinds("a"), ["event", "user", "thinking", "tool_use", "tool_result", "user"])
+        self.assertIn("\n === 2026-01-01T00:00:00Z abcdefgh note ===\n", log)  # escaped, not an entry
+        self.assertIn(" tool_use Ba sh x ===", log)
+        self.assertIn("ok\n[image]\n", log)
+        self.assertIn("no session id", log)
+        for dropped in ("injected skill body", "system line", "attached", "other id"):
+            self.assertNotIn(dropped, log)
+        self.as_session(long_sid)
+        self.run_cli("note", "-t", "a", "x")
+        self.assertIn(" 01234567 note ===", self.log("a"))
+        self.assertNotIn("012345678", self.log("a"))
+
+    def test_grep_call_detection(self):
+        hit = ["thread grep x", "cd /r && thread grep x", "python3 thread.py grep x", "./thread.py grep x",
+               "THREADS_HOME=/t thread grep x --all", 'py "C:/t/thread.py" grep x', "ls\nthread grep x"]
+        miss = ['git commit -m "fix thread grep paging"', 'grep -rn "thread grep" README.md',
+                "echo see the thread grep docs", 'thread note "use thread grep later"', "threads grep x"]
+        for c in hit:
+            self.assertTrue(thread.GREP_CALL.search(c), c)
+        for c in miss:
+            self.assertFalse(thread.GREP_CALL.search(c), c)
+        self.run_cli("new", "A")
+        use = lambda i, c: msg("assistant", [{"type": "tool_use", "id": i, "name": "Bash", "input": {"command": c}}])
+        res = lambda i, t: msg("user", [{"type": "tool_result", "tool_use_id": i, "content": t}])
+        self.say(use("g1", "thread grep x"), use("c1", miss[0]))
+        self.hook()  # the results arrive in a later capture than the calls
+        self.say(res("c1", "commit output kept"), res("g1", "grep output dropped"),
+                 res("g1", "same id again is kept"))
+        self.hook()
+        log = self.log("a")
+        self.assertIn("commit output kept", log)
+        self.assertNotIn("grep output dropped", log)
+        self.assertIn("same id again is kept", log)
+        self.assertEqual(thread.state(SID)["greps"], [])
+
+    def test_grep_output_shape_defaults_and_page_one_capture(self):
+        self.run_cli("new", "A")
+        for i in range(41):
+            self.run_cli("note", f"line {i}")
+        page = self.run_cli("grep", "line 7$").splitlines()
+        self.assertRegex(page[0], r"^a:\d+  === \S+ sess-1 note ===$")
+        self.assertEqual(int(page[0].split()[0][2:]), self.log("a").splitlines().index("line 7") + 1)
+        self.assertEqual(len(page), 5)  # location, 1 line before, the match, 1 line after, footer
+        self.assertEqual(self.run_cli("grep", "^line", "--max", "99", "--context", "0").count("\n> "), 30)
+        self.assertIn("[matches 1-30 of 41; next page: --offset 30]",
+                      self.run_cli("grep", "^line", "--max", "99", "--context", "0"))
+        self.assertIn("[matches 31-40 of 41; next page: --offset 40]",
+                      self.run_cli("grep", "^line", "--offset", "30"))
+        with self.assertRaises(SystemExit):
+            self.run_cli("grep", "x", "--all", "-t", "a")
+        self.say(msg("user", "fresh words"))
+        self.assertIn("[matches 0-0 of 0]", self.run_cli("grep", "fresh words", "--offset", "1"))
+        self.assertIn("[matches 1-1 of 1]", self.run_cli("grep", "fresh words"))  # page 1 captures
+        # an earlier grep call holds its own pattern and is left out of later searches
+        for n in range(3):
+            self.say(msg("assistant", [{"type": "tool_use", "id": f"g{n}", "name": "Bash",
+                                        "input": {"command": 'thread grep "fresh words" --max 1'}}]))
+        self.assertIn("[matches 1-1 of 1]", self.run_cli("grep", "fresh words", "--max", "1"))
+
+    def test_open_shows_only_what_follows_the_last_checkpoint(self):
+        self.run_cli("new", "A")
+        self.run_cli("note", "old note")
+        self.run_cli("checkpoint", "  Goal: g  ")
+        self.assertEqual(thread.summary("a"), "Goal: g\n")
+        self.assertIn("checkpoint", self.kinds("a"))
+        self.assertNotIn("entries since", self.run_cli("open", "a"))
+        self.say(*[msg("user", f"message {i} " + "w" * 700) for i in range(8)])
+        self.run_cli("note", "new note")
+        out = self.run_cli("open", "a")
+        self.assertIn("9 entries since the last checkpoint", out)
+        self.assertNotIn("old note", out)
+        self.assertIn("new note", out)
+        self.assertNotIn("message 1 ", out)  # only the last 6 messages
+        self.assertIn("message 2 ", out)
+        self.assertNotIn("w" * 601, out)  # each clipped to 600 characters
+        self.assertLess(self.log("a").index("message 7"), self.log("a").index("new note"))  # captured first
+
+    def test_binding_does_not_outlive_close_or_removal_by_another_session(self):
+        self.run_cli("new", "A")
+        self.as_session("sess-2")
+        self.run_cli("close", "-t", "a", "Outcome: done")
+        self.run_cli("reopen", "a")
+        with self.assertRaises(SystemExit):
+            self.run_cli("reopen", "a")  # already open
+        self.assertEqual(self.kinds("a")[-2:], ["event", "event"])
+        self.assertIn("closed\n", self.log("a"))
+        self.assertIn("reopened\n", self.log("a"))
+        self.as_session(SID)
+        self.say(msg("user", "after close and reopen elsewhere"))
+        self.assertEqual(self.hook("SessionStart"), "")  # no longer this session's thread
+        self.assertNotIn("after close and reopen elsewhere", self.log("a"))
+        self.run_cli("new", "B")
+        import shutil
+        shutil.rmtree(thread.home() / "b")
+        self.as_session("sess-2")
+        self.run_cli("new", "B")
+        self.as_session(SID)
+        self.say(msg("user", "meant for the removed thread"))
+        self.hook()
+        self.assertNotIn("meant for the removed thread", self.log("b"))
+
+    def test_ids_list_order_and_file_modes(self):
+        self.run_cli("new", "x" * 80)
+        self.assertEqual(thread.active(SID), "x" * 50)
+        self.run_cli("new", "First")
+        self.run_cli("new", "Second one")
+        with self.assertRaises(SystemExit):
+            self.run_cli("open", "one")  # a prefix, not a substring
+        rows = self.run_cli("list").splitlines()
+        self.assertTrue(rows[0].startswith("* second-one"))
+        self.assertTrue(rows[1].startswith("  first"))
+        self.run_cli("checkpoint", "s")
+        if os.name == "posix":
+            for f in ("second-one/meta.json", "second-one/summary.md", f".sessions/{SID}.json"):
+                self.assertEqual((thread.home() / f).stat().st_mode & 0o777, 0o600, f)
+            os.chmod(thread.home(), 0o755)
+            self.run_cli("note", "x")
+            self.assertEqual(thread.home().stat().st_mode & 0o777, 0o700)
+            os.chmod(self.transcript, 0)  # capture fails; the note must still be written
+            self.run_cli("note", "kept despite capture failure")
+            os.chmod(self.transcript, 0o600)
+            self.assertIn("kept despite capture failure", self.log("second-one"))
+
+    def test_hook_reads_given_transcript_and_survives_damaged_state(self):
+        self.run_cli("new", "A")
+        elsewhere = Path(self.tmp.name) / "elsewhere.jsonl"
+        elsewhere.write_text(msg("user", "from the given path"))
+        self.run_cli("hook", stdin=json.dumps({"session_id": SID, "transcript_path": str(elsewhere)}))
+        self.assertIn("from the given path", self.log("a"))
+        st = thread.state(SID)
+        st["offset"] = 99  # beyond the transcript: start again from the top
+        thread.state_path(SID).write_text(json.dumps(st))
+        self.say(msg("user", "after offset reset"))
+        self.hook()
+        self.assertIn("after offset reset", self.log("a"))
+        for bad in ("[1]", '"x"', '{"thread": 5}'):
+            thread.state_path(SID).write_text(bad)
+            self.assertEqual(self.hook("SessionStart"), "")
+            self.run_cli("list")
+        (thread.home() / "a" / "meta.json").write_text("{}")
+        self.run_cli("list", "--all")
+        self.assertFalse((thread.home() / "errors.log").exists())
+        self.run_cli("hook", stdin="x")
+        self.run_cli("hook", stdin="y")
+        self.assertEqual((thread.home() / "errors.log").read_text().count("Traceback"), 2)  # appended
+
+
+    def test_printed_details(self):
+        self.run_cli("new", "A")
+        self.run_cli("new", "B", "--kind", "bug")
+        self.say(msg("user", "stamped message"))
+        self.run_cli("checkpoint", "-t", "a", "summary for a")  # -t reaches a thread that is not active
+        self.assertEqual(thread.summary("a"), "summary for a\n")
+        self.assertEqual(thread.summary("b"), "")
+        self.run_cli("note", stdin="p" * 300 + " needle " + "q" * 900)
+        self.assertIn("=== 2026-01-01T00:00:00.000Z sess-1 user ===", self.log("b"))  # transcript time kept
+        stamp = next(e[1] for e in thread.entries("b") if e[3] == "note")
+        self.assertIn(f"- {stamp}: ppp", self.run_cli("export", "b"))
+        self.assertIn(f"[{stamp} note] ppp", self.run_cli("open", "b"))
+        self.assertIn("kind=-", self.run_cli("open", "a"))
+        self.assertIn("* a  -  open", self.run_cli("list"))  # `open a` made it active
+        page = self.run_cli("grep", "needle", "--context", "0", "-t", "b").splitlines()
+        self.assertEqual(len(page), 3)  # location, the match alone, footer
+        self.assertEqual(page[1], "> …" + "p" * 149 + " needle " + "q" * 243 + "…")
+        self.assertEqual(self.run_cli("grep", "^created", "--context", "3", "-t", "a").count("created: A"), 1)
+        self.assertNotIn("cut at", self.hook("SessionStart"))
+        self.run_cli("checkpoint", stdin="S" * (thread.CAP + 1))
+        self.assertIn(f"cut at {thread.CAP} characters", self.hook("SessionStart"))
+
+
 if __name__ == "__main__":
     unittest.main()

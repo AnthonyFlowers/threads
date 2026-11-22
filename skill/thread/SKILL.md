@@ -1,12 +1,12 @@
 ---
 name: thread
-description: Create, resume, search and close "threads" - long-lived units of work (project, feature, idea, bug) with a complete searchable log and a summary, via the local `thread` CLI. Use for /thread new|open|close|list|note|grep|checkpoint|detach|export, or "start a thread for...", "pick up / continue the X thread", "what threads are open", "close out this thread", "what did we decide about X" while a thread is active.
+description: Create, resume, search and close "threads" - long-lived units of work (project, feature, idea, bug) with a complete searchable log and a summary, via the local `thread` CLI. Use for /thread new|open|close|reopen|list|note|grep|checkpoint|detach|export, or "start a thread for...", "pick up / continue the X thread", "what threads are open", "close out this thread", "what did we decide about X" while a thread is active.
 ---
 
 # thread
 
 A thread is one unit of work that outlives a session. It has an append-only **log** (hooks capture the
-session transcript into it: messages, tool calls and tool outputs), a **summary** (where the work
+session transcript into it: messages, tool calls and tool results), a **summary** (where the work
 stands now) and a **kind** label. You forget freely; the log does not. Search it instead of re-deriving.
 
 All commands are the local `thread` CLI. It uses no network.
@@ -27,9 +27,12 @@ All commands are the local `thread` CLI. It uses no network.
 - To see whether this session has an active thread, run `thread list`: `*` marks it.
 - If a command prints `no Claude Code session id: nothing bound`, capture is off. Tell the user, and
   pass `-t <id>` on every command.
-- Never run `note`, `checkpoint` or `close` with neither text nor stdin: the command waits for input.
+- `note`, `checkpoint` and `close` need text, as arguments or on stdin. Without it they fail
+  (`empty text`, or after a 5-second wait for stdin).
 - Run `thread grep` as a command on its own. Its output is not stored in the log (it only repeats
   the log), and anything else the same shell command prints is lost with it.
+- A session has one active thread. `thread new` or `thread open` on another thread moves capture
+  to it from that point on; say so to the user before you switch.
 
 ## Commands
 
@@ -57,6 +60,8 @@ thread note <<'EOF'
 Chose `--max 30` over paging in the client: the API caps at 30 anyway.
 EOF
 ```
+
+In PowerShell, pipe a here-string instead: a line `@'`, the text, then a line `'@ | thread note`.
 
 ### Starting
 
@@ -89,7 +94,10 @@ EOF
 ### Searching
 
 `thread grep` is a case-insensitive regex over the log lines. Matching is lexical, so guess the words
-that were actually used and try alternatives (`timeout|timed out|ETIMEDOUT`).
+that were actually used and try alternatives: `thread grep 'timeout|timed out|ETIMEDOUT'`.
+
+- Always single-quote the regex. Put `--` before a pattern that starts with `-`:
+  `thread grep -- '--max'`.
 
 - `--count` first when a pattern may be broad.
 - 10 matches per page, fewer when the lines are long; always follow the `--offset N` hint in the
@@ -98,9 +106,10 @@ that were actually used and try alternatives (`timeout|timed out|ETIMEDOUT`).
 - `--all` searches every thread, open and closed. Use it to find earlier work on the same subject.
 - Each match shows `thread:line` and the entry header: time, session, and the entry type (`user`,
   `assistant`, `thinking`, `tool_use <name>`, `tool_result`, `note`, `checkpoint`, `event`). Grep
-  `tool_use Bash` or `=== .* note` to search by entry type.
-- Your own `thread grep` commands are in the log too (without their output), so a search for the
-  same words also matches the earlier command.
+  `'tool_use Bash'` or `'=== .* note'` to search by entry type.
+- Printed lines are clipped to 400 characters. For the full text, read
+  `~/.threads/<thread>/log.txt` at the line number shown.
+- Earlier `thread grep` commands are not searched.
 
 ### Closing
 

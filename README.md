@@ -15,9 +15,9 @@ index, no embeddings, no database.
 
 - `thread new` or `thread open` binds the current Claude Code session to a thread.
 - Hooks append the session transcript to that thread's `log.txt`: user and assistant messages,
-  thinking, tool calls and tool outputs, as the transcript holds them and with nothing cut by this
-  tool. Images are logged as `[image]`; Claude Code's own system lines and attachments are not
-  captured. See [Limits](#limits) for the exceptions.
+  thinking, tool calls and tool results, as the transcript holds them and with nothing cut by this
+  tool. Images are logged as `[image]`. Lines that Claude Code injects (system lines, attachments,
+  skill instructions, reminders) are not captured. See [Limits](#limits) for the exceptions.
 - The agent writes notes and, at milestones, a checkpoint that replaces `summary.md`.
 - A later session runs `thread open`, reads the summary, and uses `thread grep` for the details.
 - After Claude Code compacts the context, a hook re-injects the summary and a reminder to grep.
@@ -47,7 +47,8 @@ Needs Python 3.9+ and Claude Code. Nothing is downloaded.
    The result must be `~/.claude/skills/thread/SKILL.md`.
 
 3. Merge the `hooks` block of [hooks.json](hooks.json) into `~/.claude/settings.json`. If you already
-   have hooks for an event, add the `thread hook` entry to that event's list.
+   have hooks for an event, append the whole `{ ... }` group from `hooks.json` to that event's list.
+   For `SessionStart` it must stay a group of its own with `"matcher": "compact"`.
 
 4. Optional: allow the command, so each call does not ask for permission. Add `"Bash(thread:*)"` to
    `permissions.allow` in `~/.claude/settings.json`.
@@ -56,7 +57,7 @@ Without step 3, capture happens only when a `thread` command runs, and nothing i
 compaction.
 
 `thread` must be on the `PATH` of the non-interactive shell that runs hooks, not only of your
-terminal. Hooks are read when a session starts, so start a new session after step 3.
+terminal. If the hooks do not fire, start a new session; `/hooks` must list the four entries.
 
 ### Check the install
 
@@ -70,7 +71,9 @@ captures by itself and would hide a missing hook.
 4. Run the command from step 2 again. The number must be higher. If it is not, the Stop hook did
    not run: check that `thread` is on the `PATH` of the hook shell and that hooks are allowed.
 5. `~/.threads/errors.log` must not exist. If it does, it holds the hook's traceback.
-6. Remove the test thread: `rm -rf ~/.threads/install-check`.
+6. In the shell that runs hooks, `echo '{}' | thread hook; echo $?` must print `0`. Exit code 2
+   from a hook makes Claude Code block the turn or the compaction, so it must never happen.
+7. Remove the test thread: `rm -rf ~/.threads/install-check`.
 
 ### To check on a Windows work machine
 
@@ -78,10 +81,12 @@ None of this was run on Windows. Before relying on it there:
 
 - Expect to need two wrappers. Hooks run in Git Bash when it is installed, and Git Bash does not
   resolve `thread` to `thread.cmd`: add an extensionless file named `thread` beside it that
-  contains `#!/bin/sh` and `exec python "C:/path/to/thread.py" "$@"`. The agent's own commands may
-  run in PowerShell, which uses `thread.cmd`.
-- In PowerShell the `<<'EOF'` examples in the skill do not work. Pipe the text instead:
-  `"text" | thread note`. The permission rule in step 4 may also need a PowerShell form.
+  contains `#!/bin/sh` and `python "C:/path/to/thread.py" "$@" || exit 1`. The `|| exit 1`
+  matters: with a wrong path Python exits with code 2, which Claude Code reads as "block". The
+  agent's own commands may run in PowerShell, which uses `thread.cmd`.
+- In PowerShell the `<<'EOF'` examples in the skill do not work. Pipe a here-string instead:
+  `@'` / text / `'@ | thread note`. The permission rule for PowerShell is `PowerShell(thread *)`.
+  Windows PowerShell 5.1 may turn non-ASCII characters in piped text into `?`.
 - The SessionEnd hook has a 10-second limit in `hooks.json`. If Python starts slowly (antivirus
   scanning), raise it.
 - Python may be `python` or `py`, not `python3`.
@@ -98,11 +103,11 @@ None of this was run on Windows. Before relying on it there:
 | `thread list [--all] [--kind K]` | List open threads, newest activity first. `*` marks the active one. |
 | `thread open <id>` | Print the summary and what came after the last checkpoint; bind this session. A closed thread is shown read-only. A unique id prefix is enough. |
 | `thread note <text>` | Append a note (text as arguments or on stdin). |
-| `thread checkpoint` | Replace the summary (text as arguments or on stdin). |
-| `thread grep <regex>` | Case-insensitive search of the log. `--count`, `--max N` (10, max 30), `--offset N`, `--context N` (1, max 3), `--all` for every thread. A page ends early at about 6000 characters; the footer gives the `--offset` of the first match not shown. |
+| `thread checkpoint` | Replace the summary (text as arguments or on stdin). Warns above 6000 characters, the amount re-injected after a compaction. |
+| `thread grep <regex>` | Case-insensitive search of the log. `--count`, `--max N` (10, max 30), `--offset N`, `--context N` (1, max 3), `--all` for every thread. A page ends early at about 6000 characters; the footer gives the `--offset` of the first match not shown. Printed lines are clipped to 400 characters. Earlier `thread grep` calls are not searched. |
 | `thread detach` | Stop capturing this session. |
 | `thread close` | Close with a final summary (arguments or stdin). The log is kept. |
-| `thread reopen <id>` | Reopen a closed thread and bind this session. |
+| `thread reopen <id>` | Reopen a closed thread and bind this session. Fails on an open thread. |
 | `thread export <id>` | Print the summary and all notes as markdown. |
 | `thread hook` | Hook entry point; reads Claude Code's hook JSON on stdin. |
 
@@ -116,8 +121,8 @@ still adds to one.
 
 ```
 ~/.threads/
-  <id>/meta.json     id, title, kind, status, created, cwd
-  <id>/log.txt       append-only; each entry starts "=== <time> <session> <entry type> [tool] ==="
+  <id>/meta.json     id, title, kind, status, created, cwd, uid, closes
+  <id>/log.txt       append-only; each entry starts "=== <time> <session id, 8 chars> <entry type> [tool] ==="
   <id>/summary.md    current summary
   .sessions/         which thread each session is bound to, and how much of it is captured
   errors.log         hook failures (a hook never blocks a session)
@@ -134,27 +139,35 @@ same transcripts under `~/.claude/projects`; treat `~/.threads` the same way.
 - Capture reads Claude Code's transcript files, whose format is not documented and may change.
 - Only the main session is captured. A subagent's work appears as the prompt it was given and the
   report it returned.
-- Capture runs when a turn ends, before compaction, at session end, and on `new`, `open`, `reopen`,
-  `note`, `checkpoint`, `close`, `detach` and `grep`. A session killed mid-turn loses that turn's
-  capture until a later hook or command in the same session.
+- Capture runs when a turn ends, before compaction, at session end, and on `new`, `open` (of an
+  open thread), `reopen`, `note`, `checkpoint`, `close`, `detach` and the first page of `grep`.
+- The turn-end hook does not run when you interrupt a turn or the turn fails with an API error, and
+  nothing runs when a session is killed. That turn is captured by the next hook or `thread`
+  command in the same session, or not at all if the session is never used again.
+- Thinking is stored only when the transcript holds its text. Current Claude Code leaves most
+  thinking blocks empty.
+- `thread grep` and `thread open` clip what they print (400 and 600 characters per line or entry).
+  For the full text, read `~/.threads/<id>/log.txt` at the `thread:line` that grep shows.
+- With `--all`, pages are numbered across threads in id order. If another session adds matching
+  entries between two pages, some matches can appear twice; none is skipped.
 - Claude Code writes the transcript asynchronously, so a capture can miss the newest lines. The next
   capture takes them.
 - A transcript line the tool cannot read is skipped and recorded as an `event` entry.
 - Claude Code itself stores a very large tool output in the transcript as a short preview plus a
   file path. The log gets what the transcript holds, so it has only the preview.
 - The output of `thread grep` is not stored: the call is logged and its result is replaced by a
-  marker, because it only repeats the log. Other output of the same shell command is lost with it,
-  so run `thread grep` on its own.
+  marker, because it only repeats the log. This applies to any shell command that runs
+  `thread grep`, alone or chained (`cd x && thread grep y`), so other output of that command is
+  lost with it. A command that only mentions the words (a commit message) is not affected.
 - Inside an entry, unusual line separators (form feed, U+2028, CR) are stored as newlines, and a
   body line that starts with `=== ` gains a leading space.
 - A forked or resumed session's transcript repeats its parent's lines; only lines carrying the
   session's own id are captured.
-- When one session closes a thread, another session bound to it is detached at its next capture,
-  and what that session did since its last capture is not stored.
+- When one session closes or removes a thread, another session bound to it is detached at its next
+  capture, and what that session did since its last capture is not stored. This holds even if the
+  thread is reopened or recreated in between; run `thread open` to bind again.
 - A session that gets a new session id (for example after `/clear`) is not bound; run `thread open`
   again.
-- Every `thread grep` call is captured (the command, not its output), so a later search for the
-  same words also matches the earlier call.
 - Search is lexical. If you cannot guess a word that was used, you will not find the entry.
 
 ## Not in v1
