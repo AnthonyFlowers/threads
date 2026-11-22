@@ -50,8 +50,16 @@
   - Also changed: grep context stays inside the entry; control characters are removed from printed
     text; `note`, `new` and the compaction hook report staleness or rebinding; `checkpoint` writes the
     log before `summary.md`. hooks.json changed in this release (new `StopFailure` entry). Tests 25 -> 26.
-  - Open, owner's decision: fork/backfill rule, a reminder for sessions with no active thread, log
-    format for tool calls (ids, readable input), grep `--type` and paging order, skill trigger wording.
+- 2026-11-22: Owner decisions after the research round, all built:
+  - A session-start hook line names the open threads of the folder when the session has none active
+    (hooks.json: `SessionStart` now has no matcher; **merge hooks.json again**).
+  - Only `thread new` backfills; `open` and `reopen` capture from that moment. A fork is marked at
+    session start and `new` there captures only what the fork did.
+  - Log format: a tool call is `key: value` lines, and call and result headers carry the call id.
+    `thread grep` output is stored again and skipped at search time (replaces the earlier marker).
+  - `thread grep --type`, newest match first, subagent results as entry type `subagent`.
+  - Skill: "continue X" counts as asking to open; the agent may offer a thread once.
+  - README shortened: limits and "Not in v1" moved to `docs/LIMITS.md`. Tests 26 -> 27.
 
 ## Research notes
 

@@ -23,11 +23,13 @@ work across sessions.
   thinking, tool calls and tool results, as the transcript holds them and with nothing cut by this
   tool. Images are logged as `[image]`. Lines that Claude Code injects (system lines, attachments,
   skill instructions, reminders, its own compaction summary) are not captured. See
-  [Limits](#limits) for the exceptions.
+  [docs/LIMITS.md](docs/LIMITS.md) for the exceptions.
 - The agent writes notes and, at milestones, a checkpoint that replaces `summary.md`.
 - A later session runs `thread open`, reads the summary, and uses `thread grep` for the details.
 - After Claude Code compacts the context, a hook re-injects the summary, says how many entries are
   newer than it, and reminds the agent to grep.
+- When a session starts with no active thread in a folder where open threads were started, a hook
+  prints one line naming them. The agent opens one only if you ask to continue that work.
 
 ## Install
 
@@ -55,14 +57,14 @@ session it is in, so nothing is captured). Nothing is downloaded.
 
 3. Merge the `hooks` block of [hooks.json](hooks.json) into `~/.claude/settings.json`. If you already
    have hooks for an event, append the whole `{ ... }` group from `hooks.json` to that event's list.
-   For `SessionStart` it must stay a group of its own with `"matcher": "compact"`. On Claude Code
-   older than 2.1.78 the `StopFailure` entry is skipped with a warning; that is harmless.
+   On Claude Code older than 2.1.78 the `StopFailure` entry is skipped with a warning; that is harmless.
 
 4. Optional: allow the command, so each call does not ask for permission. Add `"Bash(thread:*)"` to
    `permissions.allow` in `~/.claude/settings.json`.
 
-Without step 3, capture happens only when a `thread` command runs, and nothing is re-injected after
-compaction.
+Without step 3, capture happens only when a `thread` command runs, nothing is re-injected after
+compaction, there is no reminder in a session without a thread, and `thread new` in a forked session
+also captures the history copied from its parent.
 
 `thread` must be on the `PATH` that Claude Code itself was started with, because hooks inherit it.
 Settings changes are normally picked up by a running session; if the hooks do not fire, start a new
@@ -140,9 +142,11 @@ captures by itself and would hide a missing hook.
 
 ## Daily use
 
-- **Every new session, and every `/clear`, starts with no active thread, and nothing says so.**
-  Until you say "open the X thread" (or start a new one), that session is not captured. To check,
-  ask the agent for `thread list`: `*` marks the active thread. A `thread list` in your own
+- **Every new session, every `/clear` and every fork starts with no active thread.** Until you say
+  "open the X thread" or "continue the X work" (or start a new one), that session is not captured.
+  With the hooks installed, the agent is told in one line when open threads exist for the folder;
+  it will not open one unasked. To check, ask the agent for `thread list`: `*` marks the active
+  thread. A `thread list` in your own
   terminal never shows `*`, because the terminal is not a Claude Code session.
 - `thread list` shows open threads; `thread list --all` includes closed ones. To find a thread by
   what was said in it: `thread grep --all --count '<word>'`.
@@ -160,22 +164,22 @@ captures by itself and would hide a missing hook.
 
 | Sign | Likely cause |
 |---|---|
-| `thread list` (run by the agent) shows no `*` | New session or `/clear`; or another session closed or removed the thread. Say "open the X thread". |
+| `thread list` (run by the agent) shows no `*` | New session, `/clear` or fork; or another session closed or removed the thread. Say "open the X thread" or "continue the X work". |
 | `no Claude Code session id: nothing bound` | Claude Code older than 2.1.132, or the command was run outside Claude Code. |
 | The count in "Check the install" does not rise | `thread` not on the `PATH` Claude Code was started with; hooks blocked by policy (`/hooks`); folder not trusted. |
 | `thread list` prints "hook errors are recorded in ..." | Read `errors.log`; it holds the traceback. Delete it when solved. |
-| The same lines appear twice in a log | A forked session was opened on its parent's thread, a state file was lost, or two captures ran at once (see Limits). |
+| The same lines appear twice in a log | Two captures ran at once, or Claude Code replaced a transcript file (see docs/LIMITS.md). |
 
 ## Commands
 
 | Command | Does |
 |---|---|
-| `thread new <title> [--kind K]` | Create a thread and bind this session. A session with no earlier thread is captured from its start. The title becomes the id (lower case, at most 50 characters), so keep it to a few words. The kind is a free label and is case-sensitive. |
+| `thread new <title> [--kind K]` | Create a thread and bind this session. A session with no earlier thread is captured from its start (the command says how many lines). The title becomes the id (lower case, at most 50 characters), so keep it to a few words. The kind is a free label and is case-sensitive. |
 | `thread list [--all] [--kind K]` | List open threads, newest activity first. `*` marks the active one. |
-| `thread open <id>` | Print the summary and what came after the last checkpoint; bind this session. A closed thread is shown read-only. A unique id prefix is enough. |
+| `thread open <id>` | Print the summary and what came after the last checkpoint; bind this session, capturing from now on. A closed thread is shown read-only. A unique id prefix is enough. |
 | `thread note <text>` | Append a note (text as arguments or on stdin). Prints how many entries are newer than the last checkpoint. |
 | `thread checkpoint` | Replace the summary (text as arguments or on stdin). Warns above 6000 characters, the amount re-injected after a compaction. |
-| `thread grep <regex>` | Case-insensitive search of the log. `--count`, `--max N` (10, max 30), `--offset N`, `--context N` (1, max 3), `--all` for every thread. A page ends early at about 6000 characters; the footer gives the `--offset` of the first match not shown. Context lines stay inside the matching entry. Printed lines are clipped to 400 characters. Earlier `thread grep` calls are not searched. Options go before a `--`. |
+| `thread grep <regex>` | Case-insensitive search of the log, newest match first. `--count`, `--max N` (10, max 30), `--offset N`, `--context N` (1, max 3), `--type user,assistant,note` to search only those entry types, `--all` for every thread. A page ends early at about 6000 characters; the footer gives the `--offset` of the first match not shown. Context lines stay inside the matching entry. Printed lines are clipped to 400 characters. Earlier `thread grep` calls are not searched. Options go before a `--`. |
 | `thread detach` | Stop capturing this session. |
 | `thread close` | Close with a final summary (arguments or stdin). The log is kept. |
 | `thread reopen <id>` | Reopen a closed thread and bind this session. Fails on an open thread. |
@@ -193,7 +197,7 @@ still adds to one.
 ```
 ~/.threads/
   <id>/meta.json     id, title, kind, status, created, cwd, uid, closes
-  <id>/log.txt       append-only; each entry starts "=== <time> <session id, 8 chars> <entry type> [tool] ==="
+  <id>/log.txt       append-only; each entry starts "=== <time> <session id, 8 chars> <entry type> [tool] [call id] ==="
   <id>/summary.md    current summary
   .sessions/         which thread each session is bound to, and how much of it is captured
   errors.log         hook failures (a hook never blocks a session)
@@ -210,74 +214,18 @@ its copy until you remove it; nothing is deleted automatically. If a retention r
 work, remove old threads yourself (`rm -rf ~/.threads/<id>`). `thread grep --all` reads every
 thread, so text from one piece of work can reach a session working on another.
 
-## Limits
+## What it does not capture
 
-- Capture reads Claude Code's transcript files, whose format is not documented and may change.
-- Only the main session is captured. A subagent's work appears as the prompt it was given and the
-  report it returned.
-- Capture runs when a turn ends, before compaction, at session end, and on `new`, `open` (of an
-  open thread), `reopen`, `note`, `checkpoint`, `close`, `detach` and the first page of `grep`.
-- No hook runs when you interrupt a turn or when a session is killed. That turn is captured by the
-  next hook or `thread` command in the same session, or not at all if the session is never used
-  again. After `thread close`, the rest of the closing turn is not captured.
-- If Claude Code replaces a transcript file with a shorter one, the file is captured again from its
-  start (duplicate entries); if it rewrites it at the same or greater length, new lines can be missed.
-- Two captures of one session at the same moment (for example parallel subagents each running a
-  `thread` command) can store the same lines more than once.
-- Subagent results come back to the session as `user` lines, so they are logged as `user` entries.
-- Thinking is stored only when the transcript holds its text. Current Claude Code leaves most
-  thinking blocks empty.
-- `thread grep` and `thread open` clip what they print (400 and 600 characters per line or entry).
-  For the full text, read `~/.threads/<id>/log.txt` at the `thread:line` that grep shows.
-- Recall costs tokens and does not always help: in the paper, on a task where summaries were
-  enough, grep used 2.3 times the tokens for no significant gain.
-- `thread grep` has no time limit; a pattern with several `.*` on a very long line can run for a
-  long time.
-- Tool calls are stored as one JSON line, so quotes and backslashes in a command appear escaped
-  (`\"`, `\\`). Search for words of the command, not for the command as typed.
-- With `--all`, pages are numbered across threads in id order. If another session adds matching
-  entries between two pages, some matches can appear twice; none is skipped.
-- Claude Code writes the transcript asynchronously, so a capture can miss the newest lines. The next
-  capture takes them.
-- A transcript line the tool cannot read is skipped and recorded as an `event` entry.
-- Claude Code itself stores a very large tool output in the transcript as a short preview plus a
-  file path. The log gets what the transcript holds, so it has only the preview, and Claude Code
-  deletes the file it points to after 30 days by default.
-- The output of `thread grep` is not stored: the call is logged and its result is replaced by a
-  marker, because it only repeats the log. This applies to any shell command that runs
-  `thread grep`, alone or chained (`cd x && thread grep y`), so other output of that command is
-  lost with it. A command that only mentions the words (a commit message) is not affected.
-- Inside an entry, unusual line separators (form feed, U+2028, CR) are stored as newlines, and a
-  body line that starts with `=== ` gains a leading space.
-- A resumed session keeps its id and its binding. A forked session (`--fork-session`, `/branch`)
-  gets a new id and starts with no active thread; its transcript begins with a copy of the parent's
-  history, so `thread new` or `thread open` in a fork captures that history a second time.
-- Lines in a transcript that carry another session's id are not captured.
-- When one session closes or removes a thread, another session bound to it is detached at its next
-  capture, and what that session did since its last capture is not stored. This holds even if the
-  thread is reopened or recreated in between; run `thread open` to bind again.
-- A session that gets a new session id (for example after `/clear`) is not bound; run `thread open`
-  again.
-- Search is lexical. If you cannot guess a word that was used, you will not find the entry.
+- Sessions with no active thread. Every new session, `/clear` and fork starts that way; a hook
+  line says so when open threads exist for the folder.
+- What a session did before `thread open`. Only `thread new` claims the session so far.
+- Subagents' internal steps, images, most thinking, and very large tool outputs (Claude Code keeps
+  only a preview of those in its transcript).
+- An interrupted or killed turn, until the same session is used again.
+- Anything Claude Code changes in its undocumented transcript format without notice.
 
-## Not in v1
-
-Each of these was considered and left out. Add one when its trigger shows up.
-
-| Left out | Why | Add it when |
-|---|---|---|
-| Secret redaction | Scanning is unreliable and the same text is already in Claude Code's transcripts. | Logs must leave the machine, or policy requires it. |
-| Truncation of long tool outputs | The point of the pattern is a log that keeps what the transcript holds. | Disk use becomes a problem. |
-| Compressing or archiving closed threads | Plain files are simpler to search and inspect. | `~/.threads` grows past a few GB. |
-| Plugin packaging | Work may block plugin marketplaces; three manual steps are enough. | Several people install it. |
-| An install command | Code that edits `settings.json` is a risk for little gain. | The manual steps cause errors. |
-| More statuses (paused, blocked) | Open and closed cover the lifecycle; the summary says the rest. | `thread list` cannot answer "what is waiting". |
-| Per-kind templates | Kind is only a label. | Bug and project summaries clearly need different headings. |
-| Parent/child links | Threads are flat; name the related id in a note. | Related threads become hard to find with `grep --all`. |
-| Subagent capture | Logs would grow many times over. | A subagent's internal steps are needed for recall. |
-| Locking | Appends are one write per entry (atomic on POSIX); the summary is last-writer-wins with every version in the log. Two captures of the same session at the same instant can duplicate entries. | Duplicate or lost entries appear. |
-| `thread delete` | `rm -rf ~/.threads/<id>` does it. | A retention rule needs an audited command. |
-| `thread rename` | Ids are rarely typed in full; a prefix works. | A title turns out badly wrong often. |
+The full list, with the reasons, and the features left out of v1 are in
+[docs/LIMITS.md](docs/LIMITS.md).
 
 ## Development
 

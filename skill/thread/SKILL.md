@@ -1,6 +1,6 @@
 ---
 name: thread
-description: Create, resume, search and close "threads" - long-lived units of work (project, feature, idea, bug) with a complete searchable log and a summary, via the local `thread` CLI. Use for /thread new|open|close|reopen|list|note|grep|checkpoint|detach|export, or "start a thread for...", "pick up / continue the X thread", "what threads are open", "close out this thread", "what did we decide about X" while a thread is active.
+description: Work threads - long-lived units of work (project, feature, idea, bug) kept across sessions with a searchable log and a summary, via the local `thread` CLI. Use for /thread new|open|close|reopen|list|note|grep|checkpoint|detach|export, "start a thread for...", "pick X back up", "continue the X work/thread", "where were we on X", "what threads are open", "close this out", and "what did we decide / try / find about X" from earlier sessions. Not for Slack or email threads, CPU threads or "this thread of conversation".
 ---
 
 # thread
@@ -16,7 +16,11 @@ All commands are the local `thread` CLI. It uses no network.
 
 ## Rules
 
-- Create, open, close or reopen a thread **only when the user asks**. Never start one on your own.
+- Create, open, close or reopen a thread **only when the user asks**. A request to continue named
+  earlier work ("pick the billing work back up", "where were we on X") counts as asking to open
+  the thread on it. A session-start line that lists open threads is information, not a request.
+- When work is clearly going to span sessions and no thread is active, you may offer to start one,
+  **once**. If the user does not take it up, do not offer again in that session.
 - While a thread is active, do these without being asked:
   - **Checkpoint** whenever the summary would mislead a cold reader: a piece of work is done, a
     decision changed the plan, or the next step changed. You cannot tell when a session ends, so
@@ -81,13 +85,14 @@ wrapper would run part of it as a command. For such a regex, ask the user for th
 3. Write a first checkpoint: the goal, what "done" means, and the first step.
 
 `thread new` binds this session. If the session had no thread before, everything said so far in the
-session is captured too; tell the user.
+session is captured too (the command says how many lines); tell the user.
 
 ### Resuming
 
 1. If the user gave no id, run `thread list` (`--all` if nothing fits) and match on the title. If
    two or more fit, ask. To find a thread by content: `thread grep --all --count '<word>'`.
-2. `thread open <id-or-unique-prefix>`. It prints the summary, then the count of entries after the
+2. `thread open <id-or-unique-prefix>`. Capture starts at this point; what the session did before
+   is not logged, so note anything from it that matters. It prints the summary, then the count of entries after the
    last checkpoint with their notes and latest messages. A few are normal (the end of the turn that
    wrote the checkpoint); many mean the summary is stale.
 3. Tell the user in two or three lines where the work stands and the next step. Grep for what you
@@ -124,20 +129,23 @@ that were actually used and try alternatives: `thread grep 'timeout|timed out|ET
 
 - Always single-quote the regex. Put `--` before a pattern that starts with `-`, with any options
   ahead of it: `thread grep --count -- '--max'`.
-- Tool calls are stored as JSON, so quotes and backslashes in a command are escaped there. Search
-  for words of the command (`'pytest.*batch'`), not for the command as typed.
+- A tool call is stored as `key: value` lines (`command: ...`, `file_path: ...`), so a command or
+  path can be searched as typed. Its header and the header of its result carry the same call id;
+  grep that id to see both.
 
 - `--count` first when a pattern may be broad.
-- 10 matches per page, fewer when the lines are long; always follow the `--offset N` hint in the
-  footer for the next page; `--max` up to 30.
+- Matches come newest first, 10 per page, fewer when the lines are long; follow the `--offset N`
+  hint in the footer for older ones; `--max` up to 30.
+- `--type user,assistant,note` searches only what was said and noted, leaving out file contents
+  and command output. Use it to find a decision. Types: `user`, `assistant`, `thinking`,
+  `tool_use`, `tool_result`, `subagent`, `note`, `checkpoint`, `event`.
 - `--context N` sets the lines shown around each match, inside its entry: 0 to 3, default 1.
 - `--all` searches every thread, open and closed. Use it to find earlier work on the same subject.
-- Each match shows `thread:line` and the entry header: time, session, and the entry type (`user`,
-  `assistant`, `thinking`, `tool_use <name>`, `tool_result`, `note`, `checkpoint`, `event`). Grep
-  `'tool_use Bash'` or `'=== .* note'` to search by entry type.
+- Each match shows `thread:line` and the entry header: time, session, entry type and, for tool
+  calls and results, the tool name and call id.
 - Printed lines are clipped to 400 characters. For the full text, read
   `~/.threads/<thread>/log.txt` at the line number shown.
-- Earlier `thread grep` commands are not searched.
+- Earlier `thread grep` commands and their output are not searched.
 
 ### Closing
 

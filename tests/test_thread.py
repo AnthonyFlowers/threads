@@ -51,9 +51,11 @@ class Case(unittest.TestCase):
             sys.stdin = old
         return out.getvalue()
 
-    def hook(self, event="Stop"):
+    def hook(self, event="Stop", source="compact", **more):
+        sid = os.environ.get("CLAUDE_CODE_SESSION_ID", SID)
         return self.run_cli("hook", stdin=json.dumps(
-            {"session_id": SID, "transcript_path": str(self.transcript), "hook_event_name": event}))
+            {"session_id": sid, "transcript_path": str(self.transcript.with_name(f"{sid}.jsonl")),
+             "hook_event_name": event, **({"source": source} if event == "SessionStart" else {}), **more}))
 
     def log(self, tid):
         return (thread.home() / tid / "log.txt").read_text(encoding="utf-8")
@@ -72,7 +74,7 @@ class Case(unittest.TestCase):
         self.hook()  # second run must not duplicate
         log = self.log("fix-login")
         self.assertEqual(log.count("looking"), 1)
-        self.assertIn("tool_use Bash ===", log)
+        self.assertIn("tool_use Bash - ===\ncommand: ls\n", log)
         self.assertIn("x" * 9000, log)  # lossless: nothing truncated
         self.assertIn("[image]", log)
         self.assertNotIn("sidechain", log)
@@ -173,7 +175,7 @@ class Case(unittest.TestCase):
             if len(nxt) == 1:
                 break
             offset = int(nxt[1].rstrip("]\n"))
-        self.assertEqual(seen, [f"> needle {i}" for i in range(12)])  # every match on some page
+        self.assertEqual(seen, [f"> needle {i}" for i in reversed(range(12))])  # every match, newest first
         self.assertIn("[matches 0-0 of 12]", self.run_cli("grep", "needle", "--offset", "99"))
         self.assertIn("[matches 1-", self.run_cli("grep", "needle", "--offset", "-5"))
 
@@ -230,22 +232,67 @@ class Case(unittest.TestCase):
             if not nxt:
                 break
             offset = int(nxt[1])
-        self.assertEqual(seen, [f"needle item{i:03d}" for i in range(25)])
+        self.assertEqual(seen, [f"needle item{i:03d}" for i in reversed(range(25))])
         self.assertLess(pages, 10)  # the footer stops offering pages
-        log = self.log("aaa")
-        self.assertIn(thread.GREP_MARK, log)  # the call is logged, its output is not
-        self.assertIn("thread grep", log)
-        self.assertNotIn("> needle item000", log)
+        self.assertIn("> needle item000", self.log("aaa"))  # calls and output are logged, not searched
 
-    def test_forked_session_does_not_recapture_parent_history(self):
+    def test_only_new_backfills_and_a_fork_starts_at_the_fork(self):
         self.say(msg("user", "parent line"))
         self.run_cli("new", "A")
-        fork = self.transcript.with_name("sess-2.jsonl")
-        fork.write_text(self.transcript.read_text() + msg("user", "fork line").replace(SID, "sess-2"))
+        # a second session: lines of another session's id, then its own; `open` captures from now on
+        other = self.transcript.with_name("sess-2.jsonl")
+        other.write_text(self.transcript.read_text() + msg("user", "before open").replace(SID, "sess-2"))
         self.as_session("sess-2")
         self.run_cli("open", "a")
-        self.assertEqual(self.log("a").count("parent line"), 1)
-        self.assertIn("fork line", self.log("a"))
+        with open(other, "a") as f:
+            f.write(msg("user", "after open").replace(SID, "sess-2"))
+        self.hook()
+        log = self.log("a")
+        self.assertEqual(log.count("parent line"), 1)
+        self.assertNotIn("before open", log)
+        self.assertIn("after open", log)
+        # a fork: its file starts with the parent's lines under the fork's own id and old timestamps
+        fork = self.transcript.with_name("sess-3.jsonl")
+        fork.write_text(msg("user", "copied from the parent").replace(SID, "sess-3"))
+        self.as_session("sess-3")
+        self.assertIn("None is active", self.hook("SessionStart", source="fork"))
+        with open(fork, "a") as f:
+            f.write(msg("user", "said in the fork").replace(SID, "sess-3").replace("2026-01-01", "2099-01-01"))
+        self.assertIn("1 earlier transcript lines", self.run_cli("new", "Forked work"))
+        self.assertNotIn("copied from the parent", self.log("forked-work"))
+        self.assertIn("said in the fork", self.log("forked-work"))
+
+    def test_session_start_reminder_type_filter_and_readable_tool_calls(self):
+        self.run_cli("new", "A")
+        here = os.getcwd()
+        self.as_session("sess-2")
+        start = lambda **kw: self.hook("SessionStart", **kw)
+        self.assertIn("Open threads started in this folder: a. None is active", start(source="startup", cwd=here))
+        self.assertIn("a. None is active", start(source="clear", cwd=os.path.join(here, "sub")))
+        self.assertEqual(start(source="startup", cwd=os.path.dirname(here) or "/nowhere"), "")
+        self.assertEqual(start(source="startup", cwd=here, agent_id="x"), "")  # a subagent's start
+        self.as_session(SID)
+        self.assertEqual(start(source="resume", cwd=here), "Active thread: a (A). This session is captured into it.\n")
+        self.assertEqual(self.hook("Stop", cwd=here), "")
+        cmd = 'pytest -k "batch and not slow" C:\\work\\app\\batch.py\necho done'
+        self.say(msg("user", "we decided to keep batch size 50"),
+                 msg("assistant", [{"type": "tool_use", "id": "t1", "name": "Bash",
+                                    "input": {"command": cmd, "timeout": 5}}]),
+                 msg("user", [{"type": "tool_result", "tool_use_id": "t1", "content": "def batch_50(): pass"}]))
+        self.hook()
+        self.assertIn(" tool_use Bash t1 ===\ncommand: " + cmd + "\ntimeout: 5\n", self.log("a"))
+        hit = self.run_cli("grep", 'pytest -k "batch', "--context", "0")
+        self.assertIn(" tool_use Bash t1 ===", hit)  # the command is found as typed
+        self.assertIn("[matches 1-1 of 1]", self.run_cli("grep", r"C:\\work\\app\\batch\.py"))
+        self.assertEqual(self.run_cli("grep", "batch", "--count").strip(), "3")
+        self.assertEqual(self.run_cli("grep", "batch", "--count", "--type", "user,note").strip(), "1")
+        self.assertIn("> we decided", self.run_cli("grep", "batch", "--type", "user"))
+        # newest first, across threads
+        self.run_cli("new", "B")
+        self.run_cli("note", "batch again, later, in another thread")
+        page = self.run_cli("grep", "batch", "--all", "--context", "0")
+        self.assertLess(page.index("batch again"), page.index("def batch_50"))
+        self.assertLess(page.index("def batch_50"), page.index("we decided"))
 
     def test_closed_thread_accepts_notes_only_and_stale_binding_clears(self):
         self.run_cli("new", "A")
@@ -312,9 +359,9 @@ class Case(unittest.TestCase):
         page = self.run_cli("grep", "needle", "--max", "99", "--context", "9")
         first = page.split("\n--\n")[0].splitlines()
         self.assertEqual(len(first), 1 + 7)  # location line + match with 3 lines either side
-        self.assertEqual([l[:6] for l in first[1:4] + first[5:]], [f"  b{n} 0" for n in (2, 3, 4, 0, 1, 2)])
+        self.assertEqual(first[1:4] + first[5:], [f"  b{n} 39" for n in (2, 3, 4, 0, 1, 2)])
         hit = next(l for l in first if l.startswith("> "))
-        self.assertIn("needle 0", hit)
+        self.assertIn("needle 39", hit)
         self.assertLess(len(hit), 500)
         self.assertLessEqual(len(re.findall(r"^> ", page, re.M)), 30)
         self.assertEqual(len(re.findall(r"^> ", self.run_cli("grep", "needle", "--max", "0")[:9000], re.M)), 1)
@@ -336,7 +383,7 @@ class Case(unittest.TestCase):
         for bad in ("", "not json", "[1,2]", json.dumps({"session_id": "../x"})):
             r = hook(bad)
             self.assertEqual((r.returncode, r.stdout), (0, b""), bad)
-        r = hook(json.dumps({**base, "hook_event_name": "SessionStart"}))
+        r = hook(json.dumps({**base, "hook_event_name": "SessionStart", "source": "compact"}))
         self.assertEqual(r.returncode, 0)
         self.assertIn(b"thread grep", r.stdout)
         self.assertLess(len(r.stdout), thread.CAP + 500)
@@ -368,6 +415,7 @@ class Case(unittest.TestCase):
                                    {"type": "tool_use", "id": "u1", "name": "Ba\nsh x", "input": {"a": 1}}]),
                  msg("user", [{"type": "tool_result", "tool_use_id": "u1",
                                "content": [{"type": "text", "text": "ok"}, {"type": "image"}]}]),
+                 msg("user", "<task-notification>agent 7 finished</task-notification>"),
                  msg("user", "injected skill body", isMeta=True),
                  json.dumps({"type": "system", "content": "system line"}) + "\n",
                  json.dumps({"type": "attachment", "attachment": "attached"}) + "\n",
@@ -375,9 +423,9 @@ class Case(unittest.TestCase):
                  msg("user", "other id").replace(SID, long_sid))
         self.hook()
         log = self.log("a")
-        self.assertEqual(self.kinds("a"), ["event", "user", "thinking", "tool_use", "tool_result", "user"])
+        self.assertEqual(self.kinds("a"), ["event", "user", "thinking", "tool_use", "tool_result", "subagent", "user"])
         self.assertIn("\n === 2026-01-01T00:00:00Z abcdefgh note ===\n", log)  # escaped, not an entry
-        self.assertIn(" tool_use Ba sh x ===", log)
+        self.assertIn(" tool_use Ba_sh_x u1 ===\na: 1\n=== 2026-01-01T00:00:00.000Z sess-1 tool_result u1 ===", log)
         self.assertIn("ok\n[image]\n", log)
         self.assertIn("no session id", log)
         for dropped in ("injected skill body", "system line", "attached", "other id"):
@@ -404,11 +452,11 @@ class Case(unittest.TestCase):
         self.say(res("c1", "commit output kept"), res("g1", "grep output dropped"),
                  res("g1", "same id again is kept"))
         self.hook()
-        log = self.log("a")
-        self.assertIn("commit output kept", log)
-        self.assertNotIn("grep output dropped", log)
-        self.assertIn("same id again is kept", log)
-        self.assertEqual(thread.state(SID)["greps"], [])
+        self.assertIn("grep output dropped", self.log("a"))  # stored: the log keeps everything
+        count = lambda rx: self.run_cli("grep", rx, "--count").strip()
+        self.assertEqual(count("commit output kept"), "1")
+        self.assertEqual(count("grep output dropped|same id again"), "0")  # but not searched
+        self.assertEqual(count("thread grep"), "1")  # the commit message; not the grep call itself
 
     def test_grep_output_shape_defaults_and_page_one_capture(self):
         self.run_cli("new", "A")
@@ -464,7 +512,7 @@ class Case(unittest.TestCase):
         self.assertIn("reopened\n", self.log("a"))
         self.as_session(SID)
         self.say(msg("user", "after close and reopen elsewhere"))
-        self.assertEqual(self.hook("SessionStart"), "")  # no longer this session's thread
+        self.assertNotIn("Active thread", self.hook("SessionStart"))  # no longer this session's thread
         self.assertNotIn("after close and reopen elsewhere", self.log("a"))
         self.run_cli("new", "B")
         import shutil
@@ -512,7 +560,7 @@ class Case(unittest.TestCase):
         self.assertIn("after offset reset", self.log("a"))
         for bad in ("[1]", '"x"', '{"thread": 5}'):
             thread.state_path(SID).write_text(bad)
-            self.assertEqual(self.hook("SessionStart"), "")
+            self.assertNotIn("Active thread", self.hook("SessionStart"))
             self.run_cli("list")
         (thread.home() / "a" / "meta.json").write_text("{}")
         self.run_cli("list", "--all")
@@ -524,7 +572,8 @@ class Case(unittest.TestCase):
 
     def test_feedback_and_what_is_printed_back(self):
         self.say(msg("user", "before the thread"))
-        self.assertIn("created thread a\n", self.run_cli("new", "A"))
+        self.assertEqual(self.run_cli("new", "A"), "created thread a; 1 earlier transcript lines of this session "
+                         "were captured into it\n")
         self.assertIn("now captured into it, no longer into a", self.run_cli("new", "B"))
         self.assertIn("write a fresh `thread checkpoint` now", self.hook("SessionStart"))  # none yet
         self.run_cli("checkpoint", "Goal: g")

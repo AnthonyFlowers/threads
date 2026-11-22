@@ -210,15 +210,22 @@ def flat(content):
 # VAR=value assignments, a python launcher and a path. A mere mention in an argument does not count.
 GREP_CALL = re.compile(r"""(?m)(?:^|[;&|(])\s*(?:\w+=\S*\s+)*(?:\S*py\S*\s+)?["']?(?:\S*[/\\])?"""
                        r"""thread(?:\.py|\.cmd)?["']?\s+grep\b""")
-GREP_MARK = "[output of `thread grep` not stored: it only repeats this log]"
 
 
-def render(line, own=None, greps=None):
+def tool_input(inp):
+    """A tool call as `key: value` lines, strings raw: commands and paths are searchable as typed."""
+    if not isinstance(inp, dict):
+        return json.dumps(inp, ensure_ascii=False)
+    return "\n".join(f"{k}: {v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)}"
+                     for k, v in inp.items())
+
+
+def render(line, own=None, since=None):
     """One transcript JSONL line -> log entries. Raises on a line it cannot read.
 
-    `own` is the session being captured: a forked or resumed session's file also holds its
-    parent's lines, which the parent already captured. `greps` collects the ids of
-    `thread grep` calls, whose results are replaced by GREP_MARK.
+    `own` is the session being captured; lines that carry another session's id belong to that
+    session's own transcript. `since` is the moment a forked session began: its file starts with
+    a copy of the parent's lines (under the fork's id, with their old timestamps).
 
     shortcut: reads Claude Code's transcript JSONL, which is not a documented format;
     revisit when a Claude Code release changes it (tests/test_thread.py pins the shape).
@@ -232,8 +239,9 @@ def render(line, own=None, greps=None):
         return ""  # injected by Claude Code (skill bodies, reminders, its compaction summary)
     if own and d.get("sessionId") and d["sessionId"] != own:
         return ""
-    greps = [] if greps is None else greps
     ts, sid, role = "".join(str(d.get("timestamp") or now()).split()), d.get("sessionId"), d["type"]
+    if since and d.get("timestamp") and ts[:19] < since[:19]:
+        return ""
     content = (d.get("message") or {}).get("content")
     if isinstance(content, str):
         content = [{"type": "text", "text": content}]
@@ -243,33 +251,31 @@ def render(line, own=None, greps=None):
             continue
         t = b.get("type")
         if t == "text":
-            out.append(entry(ts, sid, role, b.get("text", "")))
+            text = b.get("text", "")
+            # a subagent's result comes back as a user line; the user did not say it
+            kind = "subagent" if role == "user" and text.lstrip().startswith("<task-notification>") else role
+            out.append(entry(ts, sid, kind, text))
         elif t == "thinking":
             if b.get("thinking"):
                 out.append(entry(ts, sid, "thinking", b["thinking"]))
-        elif t == "tool_use":
-            inp = b.get("input")
-            if isinstance(inp, dict) and b.get("id") and GREP_CALL.search(str(inp.get("command", ""))):
-                greps.append(b["id"])
-                del greps[:-50]  # calls that never got a result must not pile up
-            out.append(entry(ts, sid, "tool_use", json.dumps(inp, ensure_ascii=False),
-                             " ".join(str(b.get("name", "")).split())))
+        elif t == "tool_use":  # the id in the header ties a result to its call
+            name = "_".join(str(b.get("name", "")).split()) or "tool"
+            out.append(entry(ts, sid, "tool_use", tool_input(b.get("input")),
+                             f"{name} {'_'.join(str(b.get('id') or '-').split())}"))
         elif t == "tool_result":
-            if b.get("tool_use_id") in greps:
-                greps.remove(b["tool_use_id"])
-                out.append(entry(ts, sid, "tool_result", GREP_MARK))
-            else:
-                out.append(entry(ts, sid, "tool_result", flat(b.get("content"))))
+            out.append(entry(ts, sid, "tool_result", flat(b.get("content")),
+                             "_".join(str(b.get("tool_use_id") or "-").split())))
         else:
             out.append(entry(ts, sid, role, f"[{t}]"))  # images and other binary blocks
     return "".join(out)
 
 
 def capture(sid, tpath=None):
-    """Append the uncaptured part of the session transcript to the session's active thread."""
+    """Append the uncaptured part of the session transcript to the session's active thread.
+    Returns the number of transcript lines that produced entries."""
     st = state(sid)
     if not st:
-        return
+        return 0
     tid = st["thread"] = bound(st)  # None also when it was closed or removed by another session
     tpath = tpath or find_transcript(sid)
     if tpath and os.path.exists(tpath):
@@ -280,19 +286,23 @@ def capture(sid, tpath=None):
         first = st.get("offset", 0)
         if not isinstance(first, int) or not 0 <= first <= len(lines):
             first = 0  # the transcript was replaced by a shorter one, or the state is damaged
-        parts, greps = [], st.setdefault("greps", [])
+        parts = []
         for n, line in enumerate(lines[first:] if tid else [], first + 1):
             try:
-                parts.append(render(line, sid, greps))
+                parts.append(render(line, sid, st.get("since")))
             except Exception as e:  # an unknown line shape must not block the lines after it
                 parts.append(entry(now(), sid, "event",
                                    f"capture skipped transcript line {n}: {type(e).__name__}"))
-        if "".join(parts):
+        parts = [x for x in parts if x]
+        if parts:
             append(tid, "".join(parts))
         # shortcut: no lock, two captures of one session at the same instant can duplicate
         # entries; add a lock file if that ever shows up in a log.
         st["offset"] = len(lines)  # with no thread (detached) the lines are skipped for good
+        write(state_path(sid), json.dumps(st))
+        return len(parts)
     write(state_path(sid), json.dumps(st))
+    return 0
 
 
 def detach(sid):
@@ -302,17 +312,25 @@ def detach(sid):
         write(state_path(sid), json.dumps(st))
 
 
-def bind(sid, tid):
-    """Point the session at a thread. The transcript so far goes to the previous thread;
-    a session that never had a thread is captured from its start (backfill)."""
+def bind(sid, tid, backfill=False):
+    """Make tid the session's active thread. The transcript so far goes to the previous thread.
+    A session that never had a thread is captured from its start only with backfill (`thread new`);
+    otherwise capture starts here. Returns the number of backfilled transcript lines."""
     if not state_path(sid):
         print("(no Claude Code session id: nothing bound, nothing will be captured)")
-        return
-    capture(sid)
-    st = state(sid) or {"offset": 0}
+        return 0
+    st = state(sid) or {"offset": 0, "fresh": True}
+    fresh = st.pop("fresh", False)  # never bound: no state yet, or a fork marked by the hook
+    if fresh and backfill:
+        st["offset"] = 0
+    else:
+        write(state_path(sid), json.dumps(st))
+        capture(sid)  # to the previous thread; with none, this skips what came before
+        st = state(sid)
     st["thread"], st["gen"] = tid, generation(tid)
     write(state_path(sid), json.dumps(st))
-    capture(sid)
+    n = capture(sid)
+    return n if fresh and backfill else 0
 
 
 def try_capture(sid):
@@ -408,15 +426,16 @@ def cmd_new(a):
                "created": now(), "cwd": os.getcwd(), "uid": os.urandom(4).hex()})
     sid = session_id()
     was = active(sid)
-    bind(sid, tid)
+    n = bind(sid, tid, backfill=True)
     append(tid, entry(now(), sid, "event", f"created: {title}"))
-    print(f"created thread {tid}" + (f"; this session is now captured into it, no longer into {was}"
-                                     if was else ""))
+    print(f"created thread {tid}"
+          + (f"; this session is now captured into it, no longer into {was}" if was else "")
+          + (f"; {n} earlier transcript lines of this session were captured into it" if n else ""))
 
 
 def cmd_open(a):
     tid = resolve(a.id)
-    show(tid)  # before binding, so the backfill of this session is not echoed back
+    show(tid)
     if meta(tid)["status"] == "closed":
         print(f"\n(closed: shown read-only, not bound; `thread reopen {tid}` to work on it again)")
     else:
@@ -495,7 +514,8 @@ def cmd_grep(a):
         die("use --all or -t, not both")
     if a.offset <= 0:
         try_capture(session_id())  # page 1 sees the turn in progress; later pages need a stable log
-    hits, total = [], 0  # hits: (tid, lineno, header, [context lines])
+    hits, total = [], 0  # hits: (entry time, tid, lineno, header, [context lines])
+    types = {t for t in (a.type or "").replace(",", " ").split()}
     ctx = min(max(a.context, 0), 3)
     for tid in (all_ids() if a.all else [target(a)]):
         p = home() / tid / "log.txt"
@@ -504,18 +524,23 @@ def cmd_grep(a):
         # shortcut: reads the whole log into memory; stream it if logs reach hundreds of MB
         lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
         heads = [bool(HDR.match(l)) for l in lines]
-        head, own_call = "", False
+        head, skip, own_ids = "", False, set()
         for i, line in enumerate(lines):
             if heads[i]:
-                head, own_call = line, False
-            elif head.split()[3:4] == ["tool_use"] and i and lines[i - 1] is head:
-                # an earlier `thread grep` call holds its own pattern: leaving it out keeps
-                # the match count from growing with every page
-                try:
-                    own_call = bool(GREP_CALL.search(str(json.loads(line).get("command", ""))))
-                except (ValueError, AttributeError):
-                    own_call = False
-            m = None if own_call else rx.search(line)
+                head, f = line, line.split()
+                skip = bool(types) and f[3] not in types
+                if f[3] == "tool_use":
+                    # an earlier `thread grep` call holds its own pattern, and its result repeats
+                    # the log: searching them would make the match count grow with every page
+                    j = i + 1
+                    while j < len(lines) and not heads[j]:
+                        j += 1
+                    body = "\n".join(lines[i + 1:j])
+                    if GREP_CALL.search(body[9:] if body.startswith("command: ") else body):
+                        own_ids.add(f[-2])
+                if f[3] in ("tool_use", "tool_result") and f[-2] in own_ids:
+                    skip = True
+            m = None if skip else rx.search(line)
             if m and a.count:
                 total += 1
             elif m:
@@ -526,13 +551,14 @@ def cmd_grep(a):
                     hi += 1
                 block = [("> " if j == i else "  ") + clip(lines[j], m.start() if j == i else 0)
                          for j in range(lo, hi + 1)]
-                hits.append((tid, i + 1, head, block))
+                hits.append((head.split()[1][:19] if head else "", tid, i + 1, head, block))
     if a.count:
         print(total)
         return
+    hits.sort(key=lambda h: h[:3], reverse=True)  # newest first: a later decision replaces an earlier one
     start, size = max(a.offset, 0), min(max(a.max, 1), 30)
     out, used = [], 0
-    for tid, n, head, block in hits[start:start + size]:
+    for _, tid, n, head, block in hits[start:start + size]:
         piece = f"{tid}:{n}  {head}\n" + "\n".join(block)
         if out and used + len(piece) > CAP:
             break  # the page ends early; the footer points at the first match not shown
@@ -580,9 +606,15 @@ def cmd_hook(a):
         sid = d.get("session_id") or ""
         if not state_path(sid):
             return
+        start = d.get("hook_event_name") == "SessionStart"
+        if start and d.get("source") == "fork" and not state(sid):
+            # the fork's transcript begins with a copy of its parent's lines: mark where it starts
+            write(state_path(sid), json.dumps({"offset": 0, "thread": None, "fresh": True, "since": now()}))
         capture(sid, d.get("transcript_path"))
         tid = active(sid)
-        if d.get("hook_event_name") == "SessionStart" and tid:
+        if not start or d.get("agent_id"):
+            return  # only a session start of the main agent prints anything
+        if tid and d.get("source") == "compact":
             text, stale = printable(summary(tid).strip()), len(since_checkpoint(tid))
             print(f"Active thread: {tid} ({meta(tid)['title']}). Details lost to compaction are in "
                   f"its log: run `thread grep <regex>` before re-deriving anything.\n\n"
@@ -592,6 +624,22 @@ def cmd_hook(a):
                      if len(text) > CAP else "")
                   + (f"\n\n{stale} entries were logged after this summary, so it may be out of date: "
                      f"write a fresh `thread checkpoint` now." if stale or not text else ""))
+        elif tid:
+            print(f"Active thread: {tid} ({meta(tid)['title']}). This session is captured into it.")
+        else:
+            here = os.path.normcase(os.path.abspath(d.get("cwd") or os.getcwd()))
+            near = []
+            for t in all_ids():
+                try:
+                    m = meta(t)
+                    if m["status"] == "open" and here.startswith(os.path.normcase(m.get("cwd") or "\0")):
+                        near.append(t)
+                except (OSError, ValueError, KeyError, TypeError):
+                    pass
+            if near:
+                print(f"Open threads started in this folder: {', '.join(near[:8])}. None is active, so "
+                      f"this session is not captured. Open one only if the user asks to continue that "
+                      f"work (`thread open <id>`).")
     except Exception:
         try:
             home().mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -635,6 +683,7 @@ def main(argv=None):
     s.add_argument("--max", type=int, default=10, help="matches per page (default 10, max 30)")
     s.add_argument("--offset", type=int, default=0, help="skip this many matches")
     s.add_argument("--context", type=int, default=1, help="context lines (default 1, max 3)")
+    s.add_argument("--type", help="search only these entry types, e.g. user,assistant,note")
     s = cmd("list", cmd_list, "list open threads")
     s.add_argument("--all", action="store_true", help="include closed threads")
     s.add_argument("--kind")
