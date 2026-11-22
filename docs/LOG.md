@@ -10,6 +10,12 @@
 
 - 2026-11-21: Design settled in three interview passes (grill-me, grill-with-docs, grill-me). v1 built:
   `thread.py`, tests, skill, hooks snippet, glossary, ADR 0001 and 0002.
+- 2026-11-22: Two fresh subagents reviewed commit 5939282 (one on code, one on docs, skill and hooks).
+  Fixed all verified findings: grep page cap hid matches; one unreadable transcript line stopped capture;
+  stdio forced to UTF-8; closed or removed threads no longer receive capture; `~/.threads` and
+  `errors.log` modes; note text parsed as flags; unique temp file names; `grep` captures first; install
+  steps. Tests 5 -> 9, green on Python 3.14.7 and 3.9.6. `hooks.json` was checked against the official
+  hooks documentation and left unchanged. Open, unverified: behaviour on Windows (README section).
 
 ## Research notes
 

@@ -8,14 +8,15 @@ restricted work machine. Read `GLOSSARY.md` for the terms and use them exactly; 
 
 - `thread.py` stays one file, Python standard library only, no network (ADR 0002). Target Python 3.9+.
 - Thread data never goes into a repository (ADR 0001). Tests use `THREADS_HOME` in a temp directory.
-- The log is append-only and lossless. Cap only what is printed, never what is stored.
+- The log is append-only and text is stored in full. Cap only what is printed, never what is stored.
 - A hook must never fail a session: `thread hook` catches everything and writes `errors.log`.
 - A feature on the README "Not in v1" table needs the owner's OK before it is built.
 
 ## Run
 
 - Tests (the only gate): `python3 -m unittest discover -s tests`
-- Try it without touching real data: `THREADS_HOME=/tmp/t python3 thread.py new "demo"`
+- Try it without touching real data: `env -u CLAUDE_CODE_SESSION_ID THREADS_HOME=/tmp/t python3 thread.py new "demo"`
+  (without `env -u`, a run inside Claude Code binds the live session and copies its real transcript there).
 
 ## Layout
 

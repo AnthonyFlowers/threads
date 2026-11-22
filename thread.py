@@ -15,7 +15,7 @@ import traceback
 from pathlib import Path
 
 CAP = 6000  # max characters printed back to the agent per page (the paper's figure)
-HDR = re.compile(r"^=== (\S+) (\S+) (\S+)(?: (.*))? ===$")  # ts, session, kind, extra
+HDR = re.compile(r"^=== (\S+) (\S+) (\S+)(?: (.*))? ===$")  # time, session, entry type, tool name
 
 
 def home():
@@ -32,8 +32,9 @@ def now():
 
 
 def write(path, text):
+    home().mkdir(parents=True, exist_ok=True, mode=0o700)  # mkdir's mode covers only the leaf
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    tmp = path.with_name(path.name + ".tmp")
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")  # unique, so parallel writers cannot collide
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(text)
@@ -51,7 +52,7 @@ def append(tid, text):
     # one O_APPEND write per call, so entries from concurrent sessions do not interleave mid-entry
     fd = os.open(home() / tid / "log.txt", os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
     try:
-        os.write(fd, text.encode("utf-8"))
+        os.write(fd, text.encode("utf-8", "replace"))  # a lone surrogate must not stop capture
     finally:
         os.close(fd)
 
@@ -78,6 +79,13 @@ def resolve(ref):
     if len(hits) != 1:
         die(f"no thread '{ref}'" if not hits else f"'{ref}' is ambiguous: {', '.join(hits)}")
     return hits[0]
+
+
+def is_open(tid):
+    try:
+        return meta(tid)["status"] == "open"
+    except (OSError, ValueError, KeyError):
+        return False  # removed or unreadable
 
 
 def summary(tid):
@@ -122,8 +130,8 @@ def state(sid):
 
 
 def active(sid):
-    st = state(sid)
-    return st.get("thread") if st else None
+    tid = (state(sid) or {}).get("thread")
+    return tid if tid and is_open(tid) else None  # a thread closed or removed elsewhere is not active
 
 
 def find_transcript(sid):
@@ -183,23 +191,36 @@ def capture(sid, tpath=None):
     st = state(sid)
     if not st:
         return
-    tpath = tpath or find_transcript(sid)
-    if not tpath or not os.path.exists(tpath):
-        return
-    with open(tpath, encoding="utf-8", errors="replace") as f:
-        lines = f.readlines()
-    if lines and not lines[-1].endswith("\n"):
-        lines.pop()  # half-written line; take it next time
-    new = lines[st.get("offset", 0):]
     tid = st.get("thread")
-    if tid and new and (home() / tid).is_dir():
-        text = "".join(map(render, new))
-        if text:
-            append(tid, text)
-    # shortcut: no lock, two captures of one session at the same instant could duplicate
-    # entries; add a lock file if that ever shows up in a log.
-    st["offset"] = len(lines)  # with no thread (detached) the lines are skipped for good
+    if tid and not is_open(tid):
+        tid = st["thread"] = None  # closed by another session, or removed: stop capturing into it
+    tpath = tpath or find_transcript(sid)
+    if tpath and os.path.exists(tpath):
+        with open(tpath, encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+        if lines and not lines[-1].endswith("\n"):
+            lines.pop()  # half-written line; take it next time
+        first = st.get("offset", 0)
+        parts = []
+        for n, line in enumerate(lines[first:] if tid else [], first + 1):
+            try:
+                parts.append(render(line))
+            except Exception as e:  # an unknown line shape must not block the lines after it
+                parts.append(entry(now(), sid, "event",
+                                   f"capture skipped transcript line {n}: {type(e).__name__}"))
+        if "".join(parts):
+            append(tid, "".join(parts))
+        # shortcut: no lock, two captures of one session at the same instant can duplicate
+        # entries; add a lock file if that ever shows up in a log.
+        st["offset"] = len(lines)  # with no thread (detached) the lines are skipped for good
     write(state_path(sid), json.dumps(st))
+
+
+def unbind(sid):
+    st = state(sid)
+    if st:
+        st["thread"] = None
+        write(state_path(sid), json.dumps(st))
 
 
 def bind(sid, tid):
@@ -225,6 +246,7 @@ def current(args):
 
 
 def read_text(parts):
+    parts = parts[1:] if parts[:1] == ["--"] else parts
     text = " ".join(parts) if parts else sys.stdin.read()
     if not text.strip():
         die("empty text")
@@ -239,7 +261,10 @@ def show(tid):
     print(summary(tid).strip() or "(no checkpoint yet)")
     since = []
     for e in entries(tid):
-        since = [] if e[3] == "checkpoint" else since + [e]
+        if e[3] == "checkpoint":
+            since = []
+        elif e[3] != "event":
+            since.append(e)
     if not since:
         return
     notes = [e for e in since if e[3] == "note"]
@@ -253,7 +278,9 @@ def show(tid):
 
 
 def cmd_new(a):
-    title = " ".join(a.title).strip()
+    title = " ".join(" ".join(a.title).split())  # one line, single spaces
+    if not title:
+        die("empty title")
     base = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:50] or "thread"
     tid, n = base, 1
     while (home() / tid).exists():
@@ -299,12 +326,13 @@ def cmd_checkpoint(a, close=False):
     write(home() / tid / "summary.md", text + "\n")
     append(tid, entry(now(), sid, "checkpoint", text))
     if close:
+        mine = active(sid) == tid
         m = meta(tid)
         m["status"] = "closed"
         save_meta(m)
         append(tid, entry(now(), sid, "event", "closed"))
-        if active(sid) == tid:
-            cmd_detach(a, quiet=True)
+        if mine:
+            unbind(sid)  # other sessions bound to it are unbound at their next capture
     print(f"{'closed' if close else 'checkpointed'} thread {tid}")
 
 
@@ -312,17 +340,13 @@ def cmd_close(a):
     cmd_checkpoint(a, close=True)
 
 
-def cmd_detach(a, quiet=False):
+def cmd_detach(a):
     sid = session_id()
-    st = state(sid)
-    if not st or not st.get("thread"):
+    if not active(sid):
         die("no active thread")
     capture(sid)
-    st = state(sid)
-    st["thread"] = None
-    write(state_path(sid), json.dumps(st))
-    if not quiet:
-        print("detached: this session is no longer captured")
+    unbind(sid)
+    print("detached: this session is no longer captured")
 
 
 def clip(line, start=0):
@@ -337,6 +361,7 @@ def cmd_grep(a):
         rx = re.compile(a.pattern, re.I)
     except re.error as e:
         die(f"bad regex: {e}")
+    capture(session_id())  # so a search can see the turn in progress
     hits = []  # (tid, lineno, header, [context lines])
     ctx = min(max(a.context, 0), 3)
     for tid in (all_ids() if a.all else [current(a)]):
@@ -357,18 +382,19 @@ def cmd_grep(a):
     if a.count:
         print(len(hits))
         return
-    size = min(max(a.max, 1), 30)
-    page, out = hits[a.offset:a.offset + size], []
-    for tid, n, head, block in page:
-        out.append(f"{tid}:{n}  {head}\n" + "\n".join(block))
-    text = "\n--\n".join(out)
-    if len(text) > CAP:
-        text = text[:CAP] + "\n… (output capped; narrow the pattern or lower --max)"
-    if text:
-        print(text)
-    end = a.offset + len(page)
+    start, size = max(a.offset, 0), min(max(a.max, 1), 30)
+    out, used = [], 0
+    for tid, n, head, block in hits[start:start + size]:
+        piece = f"{tid}:{n}  {head}\n" + "\n".join(block)
+        if out and used + len(piece) > CAP:
+            break  # the page ends early; the footer points at the first match not shown
+        out.append(piece)
+        used += len(piece) + 4
+    if out:
+        print("\n--\n".join(out))
+    end = start + len(out)
     more = f"; next page: --offset {end}" if end < len(hits) else ""
-    print(f"[matches {a.offset + 1 if page else 0}-{end} of {len(hits)}{more}]")
+    print(f"[matches {start + 1 if out else 0}-{end if out else 0} of {len(hits)}{more}]")
 
 
 def cmd_list(a):
@@ -380,7 +406,7 @@ def cmd_list(a):
             log = home() / tid / "log.txt"
             t = log.stat().st_mtime if log.exists() else 0
             rows.append((t, f"{'*' if tid == cur else ' '} {tid}  {m['kind'] or '-'}  {m['status']}  "
-                            f"{time.strftime('%Y-%m-%d', time.gmtime(t))}  {m['title']}"))
+                            f"{time.strftime('%Y-%m-%d', time.localtime(t))}  {m['title']}"))
     print("\n".join(r for _, r in sorted(rows, reverse=True)) or "(no threads)")
 
 
@@ -406,11 +432,15 @@ def cmd_hook(a):
         if d.get("hook_event_name") == "SessionStart" and tid:
             print(f"Active thread: {tid} ({meta(tid)['title']}). Details lost to compaction are in "
                   f"its log: run `thread grep <regex>` before re-deriving anything.\n\n"
-                  f"Thread summary:\n{summary(tid).strip() or '(no checkpoint yet)'}")
+                  # Claude Code keeps only a preview of hook output above 10,000 characters
+                  f"Thread summary:\n{summary(tid).strip()[:CAP] or '(no checkpoint yet)'}")
     except Exception:
         try:
             home().mkdir(parents=True, exist_ok=True, mode=0o700)
-            with open(home() / "errors.log", "a", encoding="utf-8") as f:
+            log = home() / "errors.log"
+            big = log.exists() and log.stat().st_size > 1_000_000  # start over, do not grow forever
+            fd = os.open(log, os.O_WRONLY | os.O_CREAT | (os.O_TRUNC if big else os.O_APPEND), 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(f"{now()}\n{traceback.format_exc()}\n")
         except OSError:
             pass
@@ -432,12 +462,13 @@ def main(argv=None):
     s.add_argument("--kind", help="free-text label: project, feature, idea, bug, ...")
     cmd("open", cmd_open, "show a thread and make it active").add_argument("id")
     cmd("reopen", cmd_reopen, "reopen a closed thread and make it active").add_argument("id")
+    # REMAINDER: words after the first are text even when they look like flags; -t goes before the text
     s = cmd("note", cmd_note, "append a note to the log (text, or stdin)", thread=True)
-    s.add_argument("text", nargs="*")
+    s.add_argument("text", nargs=argparse.REMAINDER)
     s = cmd("checkpoint", cmd_checkpoint, "replace the summary (text, or stdin)", thread=True)
-    s.add_argument("text", nargs="*")
+    s.add_argument("text", nargs=argparse.REMAINDER)
     s = cmd("close", cmd_close, "close a thread with a final summary (text, or stdin)", thread=True)
-    s.add_argument("text", nargs="*")
+    s.add_argument("text", nargs=argparse.REMAINDER)
     cmd("detach", cmd_detach, "stop capturing this session")
     s = cmd("grep", cmd_grep, "regex search of the log (case-insensitive)", thread=True)
     s.add_argument("pattern")
@@ -452,6 +483,9 @@ def main(argv=None):
     cmd("export", cmd_export, "print the summary and all notes as markdown").add_argument("id")
     cmd("hook", cmd_hook, "Claude Code hook entry point (reads the hook JSON on stdin)")
 
+    for s in (sys.stdin, sys.stdout, sys.stderr):
+        if hasattr(s, "reconfigure"):  # Windows pipes default to the locale code page
+            s.reconfigure(encoding="utf-8", errors="replace")
     a = p.parse_args(argv)
     a.fn(a)
 

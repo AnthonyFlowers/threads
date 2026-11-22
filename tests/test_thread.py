@@ -145,5 +145,66 @@ class Case(unittest.TestCase):
         self.assertTrue((thread.home() / "errors.log").exists())
 
 
+    def test_bad_transcript_line_does_not_stop_capture(self):
+        self.run_cli("new", "A")
+        self.say(json.dumps({"type": "user", "sessionId": SID, "message": "plain string"}) + "\n",
+                 msg("user", [{"type": "tool_result", "content": 7}]),
+                 msg("user", "cut \ud83d here"),
+                 msg("user", "after the bad lines"))
+        self.hook()
+        self.assertFalse((thread.home() / "errors.log").exists())
+        log = self.log("a")
+        self.assertIn("capture skipped transcript line", log)
+        self.assertIn("after the bad lines", log)
+        self.run_cli("note", "still works")
+
+    def test_grep_cap_ends_page_early_and_footer_is_true(self):
+        self.run_cli("new", "A")
+        for i in range(12):
+            self.run_cli("note", stdin=f"{'x' * 500}\nneedle {i}\n{'y' * 500}\n")
+        seen, offset = [], 0
+        while True:
+            page = self.run_cli("grep", "needle", "--offset", str(offset))
+            self.assertLessEqual(len(page), thread.CAP + 200)
+            seen += [l for l in page.splitlines() if l.startswith("> ")]
+            nxt = page.rsplit("--offset ", 1)
+            if len(nxt) == 1:
+                break
+            offset = int(nxt[1].rstrip("]\n"))
+        self.assertEqual(seen, [f"> needle {i}" for i in range(12)])  # every match on some page
+        self.assertIn("[matches 0-0 of 12]", self.run_cli("grep", "needle", "--offset", "99"))
+        self.assertIn("[matches 1-", self.run_cli("grep", "needle", "--offset", "-5"))
+
+    def test_close_from_another_session_stops_capture(self):
+        self.run_cli("new", "A")
+        os.environ["CLAUDE_CODE_SESSION_ID"] = "sess-2"
+        self.run_cli("close", "-t", "a", "Outcome: done")
+        os.environ["CLAUDE_CODE_SESSION_ID"] = SID
+        self.assertIsNone(thread.active(SID))
+        self.say(msg("user", "after close"))
+        self.hook()
+        self.assertNotIn("after close", self.log("a"))
+        self.assertNotIn("entries since", self.run_cli("open", "a"))  # events do not count
+
+    def test_note_text_with_flags_modes_and_no_session(self):
+        self.run_cli("new", "A")
+        self.run_cli("note", "use", "--max", "30", "or", "-t", "x")
+        self.assertIn("use --max 30 or -t x", self.log("a"))
+        with self.assertRaises(SystemExit):
+            self.run_cli("new", "  ")
+        if os.name == "posix":
+            mode = lambda p: p.stat().st_mode & 0o777
+            self.assertEqual(mode(thread.home()), 0o700)
+            self.assertEqual(mode(thread.home() / "a" / "log.txt"), 0o600)
+            self.run_cli("hook", stdin="not json")
+            self.assertEqual(mode(thread.home() / "errors.log"), 0o600)
+        del os.environ["CLAUDE_CODE_SESSION_ID"]
+        self.assertIn("nothing bound", self.run_cli("new", "B"))
+        self.run_cli("note", "-t", "b", "by hand")
+        self.assertIn("by hand", self.log("b"))
+        with self.assertRaises(SystemExit):
+            self.run_cli("note", "no thread")
+
+
 if __name__ == "__main__":
     unittest.main()

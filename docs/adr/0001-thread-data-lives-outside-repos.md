@@ -1,7 +1,7 @@
 # Thread data lives in ~/.threads, never in a repository
 
 Threads span repositories and their logs hold complete session transcripts, which at work can include
-anything a tool printed. We keep all thread data in one machine-local directory (`~/.threads`, mode 0600)
+anything a tool printed. We keep all thread data in one machine-local directory (`~/.threads`, directories mode 0700 and files 0600)
 so it can never be committed by accident and one thread can follow work across codebases. The cost is
 accepted: no sharing with teammates through git and no sync between machines; `thread export` is the only
 way a thread's content leaves the machine.
