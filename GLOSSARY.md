@@ -33,11 +33,11 @@ One record in the log.
 _Avoid_: Line, message, record
 
 **Entry type**:
-What an entry records: a user or assistant message, thinking, a tool call, a tool result, a note, a checkpoint, or an event in the thread's life (created, closed, reopened).
+What an entry records: a user or assistant message, thinking, a tool call, a tool result, a note, a checkpoint, or an event (the thread was created, closed or reopened, or capture skipped something).
 _Avoid_: Kind (a kind belongs to a thread), role
 
 **Capture**:
-The entries taken from a session's transcript without the agent's involvement. Text is captured in full; images are recorded only as a marker.
+The entries taken from a session's transcript without the agent's involvement. Text is taken as the transcript holds it; images and the tool's own search output are recorded only as a marker.
 _Avoid_: Recording, sync
 
 **Backfill**:

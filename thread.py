@@ -33,6 +33,7 @@ def now():
 
 def write(path, text):
     home().mkdir(parents=True, exist_ok=True, mode=0o700)  # mkdir's mode covers only the leaf
+    os.chmod(home(), 0o700)  # also when the directory was there already
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")  # unique, so parallel writers cannot collide
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -126,7 +127,10 @@ def state_path(sid):
 
 def state(sid):
     p = state_path(sid)
-    return json.loads(p.read_text()) if p and p.exists() else None
+    try:
+        return json.loads(p.read_text()) if p and p.exists() else None
+    except ValueError:
+        return None  # corrupt state file: start over rather than crash every command
 
 
 def active(sid):
@@ -150,18 +154,28 @@ def flat(content):
     return "\n".join(out)
 
 
-def render(line):
-    """One transcript JSONL line -> log entries.
+GREP_CALL = re.compile(r"\bthread(\.py)?[\"']?\s+grep\b")
+GREP_MARK = "[output of `thread grep` not stored: it only repeats this log]"
+
+
+def render(line, own=None, greps=None):
+    """One transcript JSONL line -> log entries. Raises on a line it cannot read.
+
+    `own` is the session being captured: a forked or resumed session's file also holds its
+    parent's lines, which the parent already captured. `greps` collects the ids of
+    `thread grep` calls, whose results are replaced by GREP_MARK.
 
     shortcut: reads Claude Code's transcript JSONL, which is not a documented format;
     revisit when a Claude Code release changes it (tests/test_thread.py pins the shape).
     """
-    try:
-        d = json.loads(line)
-    except ValueError:
+    if not line.strip():
         return ""
+    d = json.loads(line)
     if not isinstance(d, dict) or d.get("type") not in ("user", "assistant") or d.get("isSidechain"):
         return ""
+    if own and d.get("sessionId") and d["sessionId"] != own:
+        return ""
+    greps = [] if greps is None else greps
     ts, sid, role = d.get("timestamp") or now(), d.get("sessionId"), d["type"]
     content = (d.get("message") or {}).get("content")
     if isinstance(content, str):
@@ -177,10 +191,17 @@ def render(line):
             if b.get("thinking"):
                 out.append(entry(ts, sid, "thinking", b["thinking"]))
         elif t == "tool_use":
-            out.append(entry(ts, sid, "tool_use", json.dumps(b.get("input"), ensure_ascii=False),
+            inp = b.get("input")
+            if isinstance(inp, dict) and GREP_CALL.search(str(inp.get("command", ""))):
+                greps.append(b.get("id"))
+            out.append(entry(ts, sid, "tool_use", json.dumps(inp, ensure_ascii=False),
                              str(b.get("name", "")).replace("\n", " ")))
         elif t == "tool_result":
-            out.append(entry(ts, sid, "tool_result", flat(b.get("content"))))
+            if b.get("tool_use_id") in greps:
+                greps.remove(b["tool_use_id"])
+                out.append(entry(ts, sid, "tool_result", GREP_MARK))
+            else:
+                out.append(entry(ts, sid, "tool_result", flat(b.get("content"))))
         else:
             out.append(entry(ts, sid, role, f"[{t}]"))  # images and other binary blocks
     return "".join(out)
@@ -201,10 +222,12 @@ def capture(sid, tpath=None):
         if lines and not lines[-1].endswith("\n"):
             lines.pop()  # half-written line; take it next time
         first = st.get("offset", 0)
-        parts = []
+        if first > len(lines):
+            first = 0  # the transcript was replaced by a shorter one
+        parts, greps = [], st.setdefault("greps", [])
         for n, line in enumerate(lines[first:] if tid else [], first + 1):
             try:
-                parts.append(render(line))
+                parts.append(render(line, sid, greps))
             except Exception as e:  # an unknown line shape must not block the lines after it
                 parts.append(entry(now(), sid, "event",
                                    f"capture skipped transcript line {n}: {type(e).__name__}"))
@@ -216,7 +239,7 @@ def capture(sid, tpath=None):
     write(state_path(sid), json.dumps(st))
 
 
-def unbind(sid):
+def detach(sid):
     st = state(sid)
     if st:
         st["thread"] = None
@@ -236,7 +259,15 @@ def bind(sid, tid):
     capture(sid)
 
 
-def current(args):
+def try_capture(sid):
+    """Capture ahead of a deliberate entry; a failure must not cost the entry itself."""
+    try:
+        capture(sid)
+    except Exception as e:
+        print(f"thread: capture failed ({type(e).__name__}: {e}); continuing", file=sys.stderr)
+
+
+def target(args):
     if getattr(args, "thread", None):
         return resolve(args.thread)
     tid = active(session_id())
@@ -247,6 +278,8 @@ def current(args):
 
 def read_text(parts):
     parts = parts[1:] if parts[:1] == ["--"] else parts
+    if not parts and sys.stdin.isatty():
+        die("no text: pass it as arguments or on stdin")
     text = " ".join(parts) if parts else sys.stdin.read()
     if not text.strip():
         die("empty text")
@@ -305,24 +338,27 @@ def cmd_open(a):
 
 def cmd_reopen(a):
     tid = resolve(a.id)
+    sid = session_id()
+    capture(sid)  # while it is still closed, so what a bound session did meanwhile stays out
     m = meta(tid)
     m["status"] = "open"
     save_meta(m)
-    sid = session_id()
     bind(sid, tid)
     append(tid, entry(now(), sid, "event", "reopened"))
     print(f"reopened thread {tid}")
 
 
 def cmd_note(a):
-    tid, text, sid = current(a), read_text(a.text), session_id()
-    capture(sid)  # keep the log chronological
+    tid, text, sid = target(a), read_text(a.text), session_id()
+    try_capture(sid)  # keep the log chronological
     append(tid, entry(now(), sid, "note", text))
 
 
 def cmd_checkpoint(a, close=False):
-    tid, text, sid = current(a), read_text(a.text), session_id()
-    capture(sid)
+    tid, text, sid = target(a), read_text(a.text), session_id()
+    if not is_open(tid):
+        die(f"thread {tid} is closed; only notes can be added. `thread reopen {tid}` first")
+    try_capture(sid)
     write(home() / tid / "summary.md", text + "\n")
     append(tid, entry(now(), sid, "checkpoint", text))
     if close:
@@ -332,7 +368,7 @@ def cmd_checkpoint(a, close=False):
         save_meta(m)
         append(tid, entry(now(), sid, "event", "closed"))
         if mine:
-            unbind(sid)  # other sessions bound to it are unbound at their next capture
+            detach(sid)  # other sessions bound to it are detached at their next capture
     print(f"{'closed' if close else 'checkpointed'} thread {tid}")
 
 
@@ -342,10 +378,10 @@ def cmd_close(a):
 
 def cmd_detach(a):
     sid = session_id()
-    if not active(sid):
+    if not (state(sid) or {}).get("thread"):  # also clears a binding to a thread closed elsewhere
         die("no active thread")
     capture(sid)
-    unbind(sid)
+    detach(sid)
     print("detached: this session is no longer captured")
 
 
@@ -361,10 +397,13 @@ def cmd_grep(a):
         rx = re.compile(a.pattern, re.I)
     except re.error as e:
         die(f"bad regex: {e}")
-    capture(session_id())  # so a search can see the turn in progress
+    cur = active(session_id())
+    if a.offset <= 0:
+        capture(session_id())  # page 1 sees the turn in progress; later pages need a stable log
     hits = []  # (tid, lineno, header, [context lines])
     ctx = min(max(a.context, 0), 3)
-    for tid in (all_ids() if a.all else [current(a)]):
+    # the active thread goes last: it is the only one that grows between pages
+    for tid in (sorted(all_ids(), key=lambda t: t == cur) if a.all else [target(a)]):
         p = home() / tid / "log.txt"
         if not p.exists():
             continue
@@ -401,7 +440,10 @@ def cmd_list(a):
     cur = active(session_id())
     rows = []
     for tid in all_ids():
-        m = meta(tid)
+        try:
+            m = meta(tid)
+        except (OSError, ValueError):
+            continue  # unreadable meta.json: leave it out rather than fail the listing
         if (m["status"] == "open" or a.all) and (not a.kind or m["kind"] == a.kind):
             log = home() / tid / "log.txt"
             t = log.stat().st_mtime if log.exists() else 0

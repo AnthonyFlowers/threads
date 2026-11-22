@@ -2,6 +2,8 @@ import contextlib
 import io
 import json
 import os
+import re
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -204,6 +206,152 @@ class Case(unittest.TestCase):
         self.assertIn("by hand", self.log("b"))
         with self.assertRaises(SystemExit):
             self.run_cli("note", "no thread")
+
+
+    def as_session(self, sid):
+        os.environ["CLAUDE_CODE_SESSION_ID"] = sid
+
+    def test_grep_paging_survives_capture_of_its_own_calls(self):
+        self.run_cli("new", "zzz")
+        for i in range(25):
+            self.run_cli("note", f"needle item{i:03d}")
+        self.run_cli("new", "aaa")  # the active thread sorts before the one holding the matches
+        seen, offset, pages = [], 0, 0
+        while pages < 10:
+            pages += 1
+            page = self.run_cli("grep", "needle item", "--all", "--offset", str(offset))
+            seen += re.findall(r"^> (needle item\d+)$", page, re.M)
+            # the call and its output land in the transcript, and a hook captures them
+            self.say(msg("assistant", [{"type": "tool_use", "id": f"t{pages}", "name": "Bash", "input":
+                         {"command": f'thread grep "needle item" --all --offset {offset}'}}]),
+                     msg("user", [{"type": "tool_result", "tool_use_id": f"t{pages}", "content": page}]))
+            self.hook()
+            nxt = re.search(r"--offset (\d+)\]", page)
+            if not nxt:
+                break
+            offset = int(nxt[1])
+        self.assertEqual(seen, [f"needle item{i:03d}" for i in range(25)])
+        self.assertLess(pages, 10)  # the footer stops offering pages
+        log = self.log("aaa")
+        self.assertIn(thread.GREP_MARK, log)  # the call is logged, its output is not
+        self.assertIn("thread grep", log)
+        self.assertNotIn("> needle item000", log)
+
+    def test_forked_session_does_not_recapture_parent_history(self):
+        self.say(msg("user", "parent line"))
+        self.run_cli("new", "A")
+        fork = self.transcript.with_name("sess-2.jsonl")
+        fork.write_text(self.transcript.read_text() + msg("user", "fork line").replace(SID, "sess-2"))
+        self.as_session("sess-2")
+        self.run_cli("open", "a")
+        self.assertEqual(self.log("a").count("parent line"), 1)
+        self.assertIn("fork line", self.log("a"))
+
+    def test_closed_thread_accepts_notes_only_and_stale_binding_clears(self):
+        self.run_cli("new", "A")
+        self.as_session("sess-2")
+        self.run_cli("close", "-t", "a", "Outcome: done")
+        for cmd in ("checkpoint", "close"):
+            with self.assertRaises(SystemExit):
+                self.run_cli(cmd, "-t", "a", "overwrite")
+        self.assertIn("Outcome: done", thread.summary("a"))
+        self.run_cli("note", "-t", "a", "late remark")
+        self.assertIn("late remark", self.log("a"))
+        self.as_session(SID)
+        self.run_cli("detach")  # bound to a thread closed elsewhere: detach still clears it
+        self.assertIsNone(thread.state(SID)["thread"])
+        # lines written while closed stay out, even when the same session reopens it
+        self.as_session("sess-2")
+        self.run_cli("open", "a")
+        self.as_session(SID)
+        self.run_cli("new", "B")
+        self.as_session("sess-2")
+        self.run_cli("close", "-t", "b", "Outcome: done")
+        self.as_session(SID)
+        self.say(msg("user", "while b was closed"))
+        self.run_cli("reopen", "b")
+        self.assertNotIn("while b was closed", self.log("b"))
+
+    def test_close_of_another_thread_keeps_binding_and_ids_resolve(self):
+        self.run_cli("new", "Alpha one")
+        self.run_cli("new", "Alpha one")  # same title: suffixed id
+        self.assertTrue((thread.home() / "alpha-one-2").is_dir())
+        self.run_cli("new", "Beta", "--kind", "bug")
+        self.run_cli("close", "-t", "alpha-one-2", "Outcome: done")
+        self.assertEqual(thread.active(SID), "beta")
+        self.run_cli("note", "--", "--starts with a dash")
+        self.assertIn("\n--starts with a dash\n", self.log("beta"))
+        self.assertIn("Beta", self.run_cli("open", "be"))  # unique prefix
+        with self.assertRaises(SystemExit):
+            self.run_cli("open", "al")  # ambiguous prefix
+        listed = self.run_cli("list", "--kind", "bug")
+        self.assertIn("beta", listed)
+        self.assertNotIn("alpha", listed)
+        self.run_cli("checkpoint", "Goal: beta")
+        out = self.run_cli("export", "beta")
+        self.assertIn("--starts with a dash", out)
+        self.assertNotIn("created: Beta", out)  # notes only, no other entries
+        self.assertIsNone(thread.state_path("../evil"))
+
+    def test_half_written_line_blank_line_and_invalid_json(self):
+        self.run_cli("new", "A")
+        whole = msg("user", "complete at last")
+        self.say("\n", "{not json\n", whole[:-20])
+        self.hook()
+        self.assertNotIn("complete at last", self.log("a"))
+        self.assertEqual(self.log("a").count("capture skipped transcript line"), 1)
+        self.say(whole[-20:])
+        self.hook()
+        self.assertEqual(self.log("a").count("complete at last"), 1)
+
+    def test_grep_flags_are_clamped_and_long_lines_clipped(self):
+        self.run_cli("new", "A")
+        for i in range(40):
+            self.run_cli("note", stdin=f"before {i}\n{'z' * 2000} needle {i} {'z' * 2000}\nafter {i}\n")
+        page = self.run_cli("grep", "needle", "--max", "99", "--context", "9")
+        first = page.split("\n--\n")[0].splitlines()
+        self.assertEqual(len(first), 1 + 7)  # location line + match with 3 lines either side
+        hit = next(l for l in first if l.startswith("> "))
+        self.assertIn("needle 0", hit)
+        self.assertLess(len(hit), 500)
+        self.assertLessEqual(len(re.findall(r"^> ", page, re.M)), 30)
+        self.assertEqual(len(re.findall(r"^> ", self.run_cli("grep", "needle", "--max", "0")[:9000], re.M)), 1)
+
+    def test_hook_as_a_process_is_silent_exits_zero_and_caps_the_summary(self):
+        self.run_cli("new", "A")
+        self.run_cli("checkpoint", stdin="S" * 9000)
+        self.say(msg("user", "ünïcödé ✓"))
+        script = str(Path(thread.__file__).resolve())
+
+        def hook(payload, **env):
+            return subprocess.run([sys.executable, script, "hook"], input=payload.encode(),
+                                  capture_output=True, env={**os.environ, **env})
+        base = {"session_id": SID, "transcript_path": str(self.transcript)}
+        for event in ("Stop", "PreCompact", "SessionEnd"):
+            r = hook(json.dumps({**base, "hook_event_name": event}), PYTHONIOENCODING="cp1252")
+            self.assertEqual((r.returncode, r.stdout), (0, b""), event)
+        self.assertIn("ünïcödé ✓", self.log("a"))
+        for bad in ("", "not json", "[1,2]", json.dumps({"session_id": "../x"})):
+            r = hook(bad)
+            self.assertEqual((r.returncode, r.stdout), (0, b""), bad)
+        r = hook(json.dumps({**base, "hook_event_name": "SessionStart"}))
+        self.assertEqual(r.returncode, 0)
+        self.assertIn(b"thread grep", r.stdout)
+        self.assertLess(len(r.stdout), thread.CAP + 500)
+        # exit codes and stdio of the CLI itself
+        r = subprocess.run([sys.executable, script, "checkpoint"], input=b"  ", capture_output=True,
+                           env=dict(os.environ))
+        self.assertEqual(r.returncode, 1)
+        self.assertIn(b"empty text", r.stderr)
+
+    def test_corrupt_state_and_meta_do_not_crash(self):
+        self.run_cli("new", "A")
+        self.run_cli("new", "B")
+        thread.state_path(SID).write_text("{")
+        (thread.home() / "a" / "meta.json").write_text("")
+        self.assertIn("b", self.run_cli("list"))
+        self.assertEqual(self.hook(), "")
+        self.assertFalse((thread.home() / "errors.log").exists())
 
 
 if __name__ == "__main__":

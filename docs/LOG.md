@@ -16,6 +16,14 @@
   `errors.log` modes; note text parsed as flags; unique temp file names; `grep` captures first; install
   steps. Tests 5 -> 9, green on Python 3.14.7 and 3.9.6. `hooks.json` was checked against the official
   hooks documentation and left unchanged. Open, unverified: behaviour on Windows (README section).
+- 2026-11-22: Second review by two fresh subagents at ae5c8a8. Owner decisions: the output of
+  `thread grep` is not stored (the call is); a closed thread accepts notes only. Fixed: grep paging
+  when its own calls are captured (active thread searched last, capture only on page 1); forked
+  sessions re-capturing parent history; stale binding after a close elsewhere; reopen capturing the
+  closed span; capture failure losing a note; corrupt state/meta crashes; invalid-JSON lines now
+  recorded; home directory mode; SessionEnd timeout 10 s; install check redone so it fails without
+  hooks. Tests 9 -> 17, including the hook and CLI as subprocesses. A reviewer's mutation run had
+  22 of 26 mutants survive the 9-test suite; not re-run against the new suite.
 
 ## Research notes
 

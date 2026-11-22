@@ -8,7 +8,7 @@ restricted work machine. Read `GLOSSARY.md` for the terms and use them exactly; 
 
 - `thread.py` stays one file, Python standard library only, no network (ADR 0002). Target Python 3.9+.
 - Thread data never goes into a repository (ADR 0001). Tests use `THREADS_HOME` in a temp directory.
-- The log is append-only and text is stored in full. Cap only what is printed, never what is stored.
+- The log is append-only and stores transcript text uncut (README "Limits" lists the exceptions). Cap only what is printed, never what is stored.
 - A hook must never fail a session: `thread hook` catches everything and writes `errors.log`.
 - A feature on the README "Not in v1" table needs the owner's OK before it is built.
 

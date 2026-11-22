@@ -15,8 +15,9 @@ index, no embeddings, no database.
 
 - `thread new` or `thread open` binds the current Claude Code session to a thread.
 - Hooks append the session transcript to that thread's `log.txt`: user and assistant messages,
-  thinking, tool calls and tool outputs, with no text truncated. Images are logged as `[image]`;
-  Claude Code's own system lines and attachments are not captured.
+  thinking, tool calls and tool outputs, as the transcript holds them and with nothing cut by this
+  tool. Images are logged as `[image]`; Claude Code's own system lines and attachments are not
+  captured. See [Limits](#limits) for the exceptions.
 - The agent writes notes and, at milestones, a checkpoint that replaces `summary.md`.
 - A later session runs `thread open`, reads the summary, and uses `thread grep` for the details.
 - After Claude Code compacts the context, a hook re-injects the summary and a reminder to grep.
@@ -28,9 +29,11 @@ Needs Python 3.9+ and Claude Code. Nothing is downloaded.
 1. Put `thread.py` on your `PATH` as `thread`:
 
    ```sh
-   chmod +x thread.py
+   mkdir -p ~/.local/bin
    ln -s "$PWD/thread.py" ~/.local/bin/thread
    ```
+
+   `~/.local/bin` must be on your `PATH`; `thread --help` must work in a new terminal.
 
    On Windows, copy `thread.py` somewhere and add a `thread.cmd` on `PATH` that contains
    `@python C:\path\to\thread.py %*`.
@@ -57,22 +60,30 @@ terminal. Hooks are read when a session starts, so start a new session after ste
 
 ### Check the install
 
-In a new Claude Code session:
+The check must be made from outside the session, because a `thread` command run by the agent
+captures by itself and would hide a missing hook.
 
-1. Ask for `thread new install check`, then send one more message.
-2. `thread grep --count .` must print a number that rises after each turn.
-3. `~/.threads/errors.log` must not exist. If it does, it holds the hook's traceback.
-4. Remove the test thread: `rm -rf ~/.threads/install-check`.
+1. In a new Claude Code session, ask for `thread new install check`.
+2. In a separate terminal, run `thread grep --count . -t install-check` and note the number.
+3. In the session, send one ordinary message (for example "say hello") and wait for the reply. Do
+   not ask for any `thread` command.
+4. Run the command from step 2 again. The number must be higher. If it is not, the Stop hook did
+   not run: check that `thread` is on the `PATH` of the hook shell and that hooks are allowed.
+5. `~/.threads/errors.log` must not exist. If it does, it holds the hook's traceback.
+6. Remove the test thread: `rm -rf ~/.threads/install-check`.
 
 ### To check on a Windows work machine
 
 None of this was run on Windows. Before relying on it there:
 
-- Claude Code on Windows usually runs commands in Git Bash, which does not resolve `thread` to
-  `thread.cmd`. If `thread` is not found, add an extensionless file named `thread` beside it that
-  contains `#!/bin/sh` and `exec python "C:/path/to/thread.py" "$@"`.
-- If commands run in PowerShell instead, the `<<'EOF'` examples in the skill do not work; pipe the
-  text to the command instead.
+- Expect to need two wrappers. Hooks run in Git Bash when it is installed, and Git Bash does not
+  resolve `thread` to `thread.cmd`: add an extensionless file named `thread` beside it that
+  contains `#!/bin/sh` and `exec python "C:/path/to/thread.py" "$@"`. The agent's own commands may
+  run in PowerShell, which uses `thread.cmd`.
+- In PowerShell the `<<'EOF'` examples in the skill do not work. Pipe the text instead:
+  `"text" | thread note`. The permission rule in step 4 may also need a PowerShell form.
+- The SessionEnd hook has a 10-second limit in `hooks.json`. If Python starts slowly (antivirus
+  scanning), raise it.
 - Python may be `python` or `py`, not `python3`.
 - The skill goes in `%USERPROFILE%\.claude\skills\thread\`, the hooks in
   `%USERPROFILE%\.claude\settings.json`.
@@ -96,14 +107,16 @@ None of this was run on Windows. Before relying on it there:
 | `thread hook` | Hook entry point; reads Claude Code's hook JSON on stdin. |
 
 `note`, `checkpoint`, `close` and `grep` use the session's active thread; `-t <id>` names another.
-Put `-t` before the text: everything after the first word of text is taken as text. Use stdin for
-text with quotes, backticks or `$`.
+Put `-t` before the text: everything after the first word of text is taken as text. Text whose
+first word starts with `-` needs `--` before it (`thread note -- --max was wrong`). Use stdin for
+text with quotes, backticks or `$`. `checkpoint` and `close` refuse a closed thread; `note -t`
+still adds to one.
 
 ## Data
 
 ```
 ~/.threads/
-  <id>/meta.json     title, kind, status, created, cwd
+  <id>/meta.json     id, title, kind, status, created, cwd
   <id>/log.txt       append-only; each entry starts "=== <time> <session> <entry type> [tool] ==="
   <id>/summary.md    current summary
   .sessions/         which thread each session is bound to, and how much of it is captured
@@ -127,10 +140,21 @@ same transcripts under `~/.claude/projects`; treat `~/.threads` the same way.
 - Claude Code writes the transcript asynchronously, so a capture can miss the newest lines. The next
   capture takes them.
 - A transcript line the tool cannot read is skipped and recorded as an `event` entry.
+- Claude Code itself stores a very large tool output in the transcript as a short preview plus a
+  file path. The log gets what the transcript holds, so it has only the preview.
+- The output of `thread grep` is not stored: the call is logged and its result is replaced by a
+  marker, because it only repeats the log. Other output of the same shell command is lost with it,
+  so run `thread grep` on its own.
+- Inside an entry, unusual line separators (form feed, U+2028, CR) are stored as newlines, and a
+  body line that starts with `=== ` gains a leading space.
+- A forked or resumed session's transcript repeats its parent's lines; only lines carrying the
+  session's own id are captured.
+- When one session closes a thread, another session bound to it is detached at its next capture,
+  and what that session did since its last capture is not stored.
 - A session that gets a new session id (for example after `/clear`) is not bound; run `thread open`
   again.
-- Every `thread grep` call and its output are captured too, so a repeated search also matches its
-  own earlier runs.
+- Every `thread grep` call is captured (the command, not its output), so a later search for the
+  same words also matches the earlier call.
 - Search is lexical. If you cannot guess a word that was used, you will not find the entry.
 
 ## Not in v1
@@ -140,11 +164,11 @@ Each of these was considered and left out. Add one when its trigger shows up.
 | Left out | Why | Add it when |
 |---|---|---|
 | Secret redaction | Scanning is unreliable and the same text is already in Claude Code's transcripts. | Logs must leave the machine, or policy requires it. |
-| Truncation of long tool outputs | The point of the pattern is a lossless log. | Disk use becomes a problem. |
+| Truncation of long tool outputs | The point of the pattern is a log that keeps what the transcript holds. | Disk use becomes a problem. |
 | Compressing or archiving closed threads | Plain files are simpler to search and inspect. | `~/.threads` grows past a few GB. |
 | Plugin packaging | Work may block plugin marketplaces; three manual steps are enough. | Several people install it. |
 | An install command | Code that edits `settings.json` is a risk for little gain. | The manual steps cause errors. |
-| More states (paused, blocked) | Open and closed cover the lifecycle; the summary says the rest. | `thread list` cannot answer "what is waiting". |
+| More statuses (paused, blocked) | Open and closed cover the lifecycle; the summary says the rest. | `thread list` cannot answer "what is waiting". |
 | Per-kind templates | Kind is only a label. | Bug and project summaries clearly need different headings. |
 | Parent/child links | Threads are flat; name the related id in a note. | Related threads become hard to find with `grep --all`. |
 | Subagent capture | Logs would grow many times over. | A subagent's internal steps are needed for recall. |
