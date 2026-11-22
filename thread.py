@@ -37,9 +37,31 @@ def write(path, text):
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")  # unique, so parallel writers cannot collide
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8", errors="replace") as f:
+    with os.fdopen(fd, "w", encoding="utf-8", errors="replace", newline="\n") as f:
         f.write(text)
-    os.replace(tmp, path)
+    for attempt in range(40):
+        try:
+            return os.replace(tmp, path)
+        except PermissionError:  # Windows: another process (a hook, antivirus) has the target open
+            if attempt == 39:
+                os.unlink(tmp)
+                raise
+            time.sleep(0.025)
+
+
+def read(path):
+    for attempt in range(40):
+        try:
+            return path.read_text(encoding="utf-8")
+        except PermissionError:  # Windows: the file is being replaced at this moment
+            if attempt == 39:
+                raise
+            time.sleep(0.025)
+
+
+def printable(s):
+    """Log text goes back to a terminal and into the agent's context: drop control characters."""
+    return re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", "", s)
 
 
 def entry(ts, sid, kind, body, extra=""):
@@ -50,8 +72,23 @@ def entry(ts, sid, kind, body, extra=""):
 
 
 def append(tid, text):
-    # one O_APPEND write per call, so entries from concurrent sessions do not interleave mid-entry
-    fd = os.open(home() / tid / "log.txt", os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    # one append-mode write per call, so entries from concurrent sessions do not interleave mid-entry
+    path = str(home() / tid / "log.txt")
+    if os.name == "nt":
+        # the C runtime's O_APPEND seeks and then writes, and text mode splits the write at each
+        # newline: parallel writers lose data. FILE_APPEND_DATA appends atomically in the kernel.
+        import ctypes
+        import msvcrt
+        create = ctypes.windll.kernel32.CreateFileW
+        create.restype = ctypes.c_void_p
+        create.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p,
+                           ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p]
+        handle = create(path, 0x4, 0x7, None, 4, 0x80, None)  # append, share all, OPEN_ALWAYS
+        if handle in (None, ctypes.c_void_p(-1).value):
+            raise ctypes.WinError()
+        fd = msvcrt.open_osfhandle(handle, os.O_BINARY)
+    else:
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
     try:
         os.write(fd, text.encode("utf-8", "replace"))  # a lone surrogate must not stop capture
     finally:
@@ -61,7 +98,7 @@ def append(tid, text):
 # ---- threads ----
 
 def meta(tid):
-    return json.loads((home() / tid / "meta.json").read_text(encoding="utf-8"))
+    return json.loads(read(home() / tid / "meta.json"))
 
 
 def save_meta(m):
@@ -135,7 +172,7 @@ def state_path(sid):
 def state(sid):
     p = state_path(sid)
     try:
-        st = json.loads(p.read_text()) if p and p.exists() else None
+        st = json.loads(read(p)) if p and p.exists() else None
     except ValueError:
         st = None
     return st if isinstance(st, dict) else None  # corrupt state file: start over, do not crash
@@ -191,8 +228,8 @@ def render(line, own=None, greps=None):
     d = json.loads(line)
     if not isinstance(d, dict) or d.get("type") not in ("user", "assistant") or d.get("isSidechain"):
         return ""
-    if d.get("isMeta"):
-        return ""  # injected by Claude Code (skill bodies, reminders), not said by anyone
+    if d.get("isMeta") or d.get("isCompactSummary"):
+        return ""  # injected by Claude Code (skill bodies, reminders, its compaction summary)
     if own and d.get("sessionId") and d["sessionId"] != own:
         return ""
     greps = [] if greps is None else greps
@@ -295,18 +332,35 @@ def target(args):
     return tid
 
 
+def stdin_ready(seconds=5):
+    """False when stdin is an open pipe that sends nothing: an agent's shell can hand over one
+    that never ends, and reading it would wait forever."""
+    try:
+        if os.name == "nt":
+            import ctypes
+            import msvcrt
+            handle = ctypes.c_void_p(msvcrt.get_osfhandle(sys.stdin.fileno()))
+            waiting, end = ctypes.c_ulong(), time.time() + seconds
+            while time.time() < end:
+                peek = ctypes.windll.kernel32.PeekNamedPipe(handle, None, 0, None, ctypes.byref(waiting), None)
+                if not peek or waiting.value:
+                    return True  # not a pipe, a closed pipe, or data is waiting
+                time.sleep(0.05)
+            return False
+        import select
+        return bool(select.select([sys.stdin], [], [], seconds)[0])
+    except (ValueError, OSError, TypeError, AttributeError):
+        return True  # not a real file (tests), or it cannot be watched
+
+
 def read_text(parts):
     parts = parts[1:] if parts[:1] == ["--"] else parts
     if not parts:
-        if sys.stdin.isatty():
+        if sys.stdin is None or sys.stdin.isatty():
             die("no text: pass it as arguments or on stdin")
-        try:  # an agent's shell hands over an open pipe that never ends: do not wait on it forever
-            import select
-            if os.name == "posix" and not select.select([sys.stdin], [], [], 5)[0]:
-                die("no text arrived on stdin within 5 s: pass it as arguments or a heredoc")
-        except (ValueError, OSError, TypeError):
-            pass  # not a real file (tests), or select cannot watch it
-    text = " ".join(parts) if parts else sys.stdin.read()
+        if not stdin_ready():
+            die("no text arrived on stdin within 5 s: pass it as arguments or a heredoc")
+    text = (" ".join(parts) if parts else sys.stdin.read()).lstrip("\ufeff")  # PowerShell may add a BOM
     if not text.strip():
         die("empty text")
     return text.strip()
@@ -314,21 +368,26 @@ def read_text(parts):
 
 # ---- commands ----
 
-def show(tid):
-    m = meta(tid)
-    print(f"# {m['title']}  [{tid}]  kind={m['kind'] or '-'}  status={m['status']}\n")
-    print(summary(tid).strip() or "(no checkpoint yet)")
+def since_checkpoint(tid):
     since = []
     for e in entries(tid):
         if e[3] == "checkpoint":
             since = []
         elif e[3] != "event":
             since.append(e)
+    return since
+
+
+def show(tid):
+    m = meta(tid)
+    print(f"# {m['title']}  [{tid}]  kind={m['kind'] or '-'}  status={m['status']}\n")
+    print(printable(summary(tid).strip()) or "(no checkpoint yet)")
+    since = since_checkpoint(tid)
     if not since:
         return
     notes = [e for e in since if e[3] == "note"]
     msgs = [e for e in since if e[3] in ("user", "assistant")][-6:]
-    text = "\n".join(f"[{e[1]} {e[3]}] {e[5][:600]}" for e in sorted(notes + msgs))
+    text = printable("\n".join(f"[{e[1]} {e[3]}] {e[5][:600]}" for e in sorted(notes + msgs)))
     if len(text) > CAP:
         text = "…" + text[-CAP:]
     print(f"\n-- {len(since)} entries since the last checkpoint; notes and latest messages: --")
@@ -348,16 +407,18 @@ def cmd_new(a):
     save_meta({"id": tid, "title": title, "kind": a.kind or "", "status": "open",
                "created": now(), "cwd": os.getcwd(), "uid": os.urandom(4).hex()})
     sid = session_id()
+    was = active(sid)
     bind(sid, tid)
     append(tid, entry(now(), sid, "event", f"created: {title}"))
-    print(f"created thread {tid}")
+    print(f"created thread {tid}" + (f"; this session is now captured into it, no longer into {was}"
+                                     if was else ""))
 
 
 def cmd_open(a):
     tid = resolve(a.id)
     show(tid)  # before binding, so the backfill of this session is not echoed back
     if meta(tid)["status"] == "closed":
-        print(f"\n(closed: shown read-only, not bound; `thread reopen {tid}` to resume it)")
+        print(f"\n(closed: shown read-only, not bound; `thread reopen {tid}` to work on it again)")
     else:
         bind(session_id(), tid)
 
@@ -380,6 +441,7 @@ def cmd_note(a):
     tid, text, sid = target(a), read_text(a.text), session_id()
     try_capture(sid)  # keep the log chronological
     append(tid, entry(now(), sid, "note", text))
+    print(f"noted in {tid} ({len(since_checkpoint(tid))} entries since the last checkpoint)")
 
 
 def cmd_checkpoint(a, close=False):
@@ -390,8 +452,8 @@ def cmd_checkpoint(a, close=False):
     if len(text) > CAP:
         print(f"thread: summary is {len(text)} characters; only the first {CAP} are re-injected "
               f"after a compaction", file=sys.stderr)
+    append(tid, entry(now(), sid, "checkpoint", text))  # the log first: it is the record
     write(home() / tid / "summary.md", text + "\n")
-    append(tid, entry(now(), sid, "checkpoint", text))
     if close:
         mine = active(sid) == tid
         m = meta(tid)
@@ -417,6 +479,7 @@ def cmd_detach(a):
 
 
 def clip(line, start=0):
+    line = printable(line)
     if len(line) <= 400:
         return line
     s = max(0, start - 150)
@@ -431,8 +494,8 @@ def cmd_grep(a):
     if a.all and a.thread:
         die("use --all or -t, not both")
     if a.offset <= 0:
-        capture(session_id())  # page 1 sees the turn in progress; later pages need a stable log
-    hits = []  # (tid, lineno, header, [context lines])
+        try_capture(session_id())  # page 1 sees the turn in progress; later pages need a stable log
+    hits, total = [], 0  # hits: (tid, lineno, header, [context lines])
     ctx = min(max(a.context, 0), 3)
     for tid in (all_ids() if a.all else [target(a)]):
         p = home() / tid / "log.txt"
@@ -440,9 +503,10 @@ def cmd_grep(a):
             continue
         # shortcut: reads the whole log into memory; stream it if logs reach hundreds of MB
         lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+        heads = [bool(HDR.match(l)) for l in lines]
         head, own_call = "", False
         for i, line in enumerate(lines):
-            if HDR.match(line):
+            if heads[i]:
                 head, own_call = line, False
             elif head.split()[3:4] == ["tool_use"] and i and lines[i - 1] is head:
                 # an earlier `thread grep` call holds its own pattern: leaving it out keeps
@@ -452,12 +516,19 @@ def cmd_grep(a):
                 except (ValueError, AttributeError):
                     own_call = False
             m = None if own_call else rx.search(line)
-            if m:
+            if m and a.count:
+                total += 1
+            elif m:
+                lo = hi = i  # context stays inside the entry: a neighbour's text is not this match's
+                while i - lo < ctx and lo > 0 and not heads[lo] and not heads[lo - 1]:
+                    lo -= 1
+                while hi - i < ctx and hi + 1 < len(lines) and not heads[hi + 1]:
+                    hi += 1
                 block = [("> " if j == i else "  ") + clip(lines[j], m.start() if j == i else 0)
-                         for j in range(max(0, i - ctx), min(len(lines), i + ctx + 1))]
+                         for j in range(lo, hi + 1)]
                 hits.append((tid, i + 1, head, block))
     if a.count:
-        print(len(hits))
+        print(total)
         return
     start, size = max(a.offset, 0), min(max(a.max, 1), 30)
     out, used = [], 0
@@ -488,6 +559,8 @@ def cmd_list(a):
         except (OSError, ValueError, KeyError, TypeError):
             continue  # unreadable meta.json: leave it out rather than fail the listing
     print("\n".join(r for _, r in sorted(rows, reverse=True)) or "(no threads)")
+    if (home() / "errors.log").exists():
+        print(f"(hook errors are recorded in {home() / 'errors.log'})")
 
 
 def cmd_export(a):
@@ -510,12 +583,15 @@ def cmd_hook(a):
         capture(sid, d.get("transcript_path"))
         tid = active(sid)
         if d.get("hook_event_name") == "SessionStart" and tid:
+            text, stale = printable(summary(tid).strip()), len(since_checkpoint(tid))
             print(f"Active thread: {tid} ({meta(tid)['title']}). Details lost to compaction are in "
                   f"its log: run `thread grep <regex>` before re-deriving anything.\n\n"
                   # Claude Code keeps only a preview of hook output above 10,000 characters
-                  f"Thread summary:\n{summary(tid).strip()[:CAP] or '(no checkpoint yet)'}"
+                  f"Thread summary:\n{text[:CAP] or '(no checkpoint yet)'}"
                   + (f"\n…[cut at {CAP} characters; `thread open {tid}` prints all of it]"
-                     if len(summary(tid).strip()) > CAP else ""))
+                     if len(text) > CAP else "")
+                  + (f"\n\n{stale} entries were logged after this summary, so it may be out of date: "
+                     f"write a fresh `thread checkpoint` now." if stale or not text else ""))
     except Exception:
         try:
             home().mkdir(parents=True, exist_ok=True, mode=0o700)

@@ -56,7 +56,7 @@ class Case(unittest.TestCase):
             {"session_id": SID, "transcript_path": str(self.transcript), "hook_event_name": event}))
 
     def log(self, tid):
-        return (thread.home() / tid / "log.txt").read_text()
+        return (thread.home() / tid / "log.txt").read_text(encoding="utf-8")
 
     def test_backfill_capture_and_switch(self):
         self.say(msg("user", "before any thread"))
@@ -307,10 +307,12 @@ class Case(unittest.TestCase):
     def test_grep_flags_are_clamped_and_long_lines_clipped(self):
         self.run_cli("new", "A")
         for i in range(40):
-            self.run_cli("note", stdin=f"before {i}\n{'z' * 2000} needle {i} {'z' * 2000}\nafter {i}\n")
+            body = "".join(f"b{n} {i}\n" for n in range(5))
+            self.run_cli("note", stdin=f"{body}{'z' * 2000} needle {i} {'z' * 2000}\n{body}")
         page = self.run_cli("grep", "needle", "--max", "99", "--context", "9")
         first = page.split("\n--\n")[0].splitlines()
         self.assertEqual(len(first), 1 + 7)  # location line + match with 3 lines either side
+        self.assertEqual([l[:6] for l in first[1:4] + first[5:]], [f"  b{n} 0" for n in (2, 3, 4, 0, 1, 2)])
         hit = next(l for l in first if l.startswith("> "))
         self.assertIn("needle 0", hit)
         self.assertLess(len(hit), 500)
@@ -415,7 +417,7 @@ class Case(unittest.TestCase):
         page = self.run_cli("grep", "line 7$").splitlines()
         self.assertRegex(page[0], r"^a:\d+  === \S+ sess-1 note ===$")
         self.assertEqual(int(page[0].split()[0][2:]), self.log("a").splitlines().index("line 7") + 1)
-        self.assertEqual(len(page), 5)  # location, 1 line before, the match, 1 line after, footer
+        self.assertEqual(len(page), 3)  # location, the match, footer: context stays inside the entry
         self.assertEqual(self.run_cli("grep", "^line", "--max", "99", "--context", "0").count("\n> "), 30)
         self.assertIn("[matches 1-30 of 41; next page: --offset 30]",
                       self.run_cli("grep", "^line", "--max", "99", "--context", "0"))
@@ -519,6 +521,33 @@ class Case(unittest.TestCase):
         self.run_cli("hook", stdin="y")
         self.assertEqual((thread.home() / "errors.log").read_text().count("Traceback"), 2)  # appended
 
+
+    def test_feedback_and_what_is_printed_back(self):
+        self.say(msg("user", "before the thread"))
+        self.assertIn("created thread a\n", self.run_cli("new", "A"))
+        self.assertIn("now captured into it, no longer into a", self.run_cli("new", "B"))
+        self.assertIn("write a fresh `thread checkpoint` now", self.hook("SessionStart"))  # none yet
+        self.run_cli("checkpoint", "Goal: g")
+        self.assertNotIn("out of date", self.hook("SessionStart"))
+        self.assertEqual(self.run_cli("note", stdin="\ufeffwith a BOM \x1b]0;TITLE\x07 and escapes\n"),
+                         "noted in b (1 entries since the last checkpoint)\n")
+        self.assertIn("\nwith a BOM", self.log("b"))
+        self.assertIn("1 entries were logged after this summary", self.hook("SessionStart"))
+        for out in (self.run_cli("grep", "BOM"), self.run_cli("open", "b")):
+            self.assertIn("with a BOM ]0;TITLE and escapes", out)  # control characters removed
+            self.assertNotIn("\x1b", out)
+        self.say(msg("user", "Claude Code's own compaction summary", isCompactSummary=True))
+        self.hook()
+        self.assertNotIn("own compaction summary", self.log("b"))
+        self.assertNotIn("errors.log", self.run_cli("list"))
+        self.run_cli("hook", stdin="x")
+        self.assertIn("hook errors are recorded in", self.run_cli("list"))
+        old, sys.stdin = sys.stdin, None
+        try:
+            with self.assertRaises(SystemExit):
+                thread.read_text([])
+        finally:
+            sys.stdin = old
 
     def test_printed_details(self):
         self.run_cli("new", "A")

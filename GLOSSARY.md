@@ -37,7 +37,7 @@ What an entry records: a user or assistant message, thinking, a tool call, a too
 _Avoid_: Kind (a kind belongs to a thread), role
 
 **Capture**:
-The entries taken from a session's transcript without the agent's involvement. Text is taken as the transcript holds it; images and the tool's own search output are recorded only as a marker.
+The entries taken from a session's transcript without the agent's involvement. Text is taken as the transcript holds it; images and the tool's own search output are recorded only as a marker, and lines that Claude Code injects are left out.
 _Avoid_: Recording, sync
 
 **Backfill**:
