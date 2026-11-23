@@ -111,7 +111,7 @@
     that would look like a header once printed is indented. Ids no longer end in `-`. The hook
     accepts a byte-order mark. The own-grep rule knows `timeout`, `{`, `!` and `/usr/bin/env`.
   - Tests 30 -> 32.
-- 2026-11-23: Field-test fix stop 1 (`docs/FIELD-TEST.md`, findings 1 to 6; one subagent).
+- 2026-11-23: Field-test fix stop 1 (findings 1 to 6; one subagent).
   - 1, defect: the session-start line missed a thread created after the shell had moved into a
     subfolder. It now lists a thread when the two folders are the same or one is inside the other,
     ordered by last log activity, and reads "Open threads for this folder: ...". A root folder on
