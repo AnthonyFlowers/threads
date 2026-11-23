@@ -846,6 +846,17 @@ class Case(unittest.TestCase):
         self.assertIn("after a dead lock", self.log("a"))
         self.assertFalse(lock.exists())
 
+    def test_a_lock_dated_in_the_future_is_stale(self):
+        self.run_cli("new", "A")
+        for lock in (thread.state_path(SID).with_suffix(".lock"), thread.home() / "a" / ".lock"):
+            lock.write_text("")
+            ahead = time.time() + 3600  # the clock was set back, or the folder came from a machine ahead
+            os.utime(lock, (ahead, ahead))
+        t = time.time()
+        self.run_cli("checkpoint", stdin="State: go on\n")  # takes the thread lock, then the session lock
+        self.assertLess(time.time() - t, 3)
+        self.assertFalse(lock.exists())
+
     def test_hostile_values_damaged_meta_and_why_a_session_is_detached(self):
         out = self.run_cli("new", "t " * 30, "--kind", "k\nINJECT \x1b[31m\x9b\u202ekind")
         tid = thread.active(SID)

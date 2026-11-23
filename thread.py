@@ -453,7 +453,7 @@ def locked(sid, tid=None):
             break
         except (FileExistsError, PermissionError):  # PermissionError: Windows, while it is being deleted
             try:
-                if time.time() - lock.stat().st_mtime > LOCK_STALE:
+                if abs(time.time() - lock.stat().st_mtime) > LOCK_STALE:  # abs: a lock dated in the future (clock set back, folder copied) is dead too
                     os.unlink(lock)  # its holder died; two waiters doing this at once is the rare leftover race
                     continue
             except OSError:
