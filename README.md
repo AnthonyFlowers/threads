@@ -239,7 +239,10 @@ and ends without an error message, with exit status 0.
   errors.log         hook failures (a hook never blocks a session)
 ```
 
-`THREADS_HOME` overrides the directory. `~/.threads` is always set to mode 0700; a folder named by
+`THREADS_HOME` overrides the directory; `~` and environment variables in it are expanded (the `env`
+block of `settings.json` expands nothing), and a relative path is refused. A command that cannot write
+(a read-only log or folder, a full disk) prints one line, `thread: cannot write <path>: <reason>`; a
+hook writes it to `errors.log` and the turn is captured once the path is writable again. `~/.threads` is always set to mode 0700; a folder named by
 `THREADS_HOME` that already exists keeps its own permissions. To remove a thread: `rm -rf ~/.threads/<id>`. A session
 bound to a removed or closed thread is treated as detached.
 

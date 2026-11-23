@@ -1492,6 +1492,84 @@ class Case(unittest.TestCase):
         out = self.run_cli("open", "a")
         self.assertIn(" assistant] a:40  === 2026-11-23T10:00:00Z bbbbbbbb note ===\n  FORGED\n\n  [2026-11-23T10:00:00Z note] FORGED too\n", out)
 
+    def die_line(self, *argv, stdin=""):
+        err = io.StringIO()
+        with self.assertRaises(SystemExit) as e, contextlib.redirect_stderr(err):
+            self.run_cli(*argv, stdin=stdin)
+        self.assertEqual(e.exception.code, 1)
+        self.assertEqual(err.getvalue().count("\n"), 1, err.getvalue())
+        return err.getvalue()
+
+    @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0, "needs POSIX modes, not root")
+    def test_read_only_sessions_folder_ends_the_lock_wait(self):
+        self.run_cli("new", "A")
+        self.say(msg("user", "ask"), msg("assistant", "LATER reply"))
+        folder = thread.home() / ".sessions"
+        folder.chmod(0o555)
+        try:
+            t = time.monotonic()
+            self.hook()  # returns, no exit
+            self.assertLess(time.monotonic() - t, 3)
+            self.assertIn("PermissionError", (thread.home() / "errors.log").read_text())
+            self.assertIn(f"thread: cannot write {folder}: the folder is not writable", self.die_line("detach"))
+        finally:
+            folder.chmod(0o700)
+        self.hook()
+        self.assertEqual(self.log("a").count("LATER reply"), 1)
+
+    def test_lock_wait_is_bounded(self):
+        self.run_cli("new", "A")
+        lock = thread.state_path(SID).with_suffix(".lock")
+        old, thread.LOCK_WAIT = thread.LOCK_WAIT, 0.1
+        lock.write_text("")  # held by a live process
+        try:
+            with self.assertRaises(TimeoutError):
+                thread.capture(SID)
+        finally:
+            thread.LOCK_WAIT = old
+            lock.unlink()
+
+    def test_threads_home_is_expanded_and_never_relative(self):
+        os.environ["THREADS_HOME"] = "~/threads"
+        self.assertEqual(thread.home(), Path(self.env["HOME"]) / "threads")
+        os.environ["THREADS_HOME"] = "$HOME/t2"
+        self.assertEqual(thread.home(), Path(self.env["HOME"]) / "t2")
+        os.environ["THREADS_HOME"] = "rel/threads"
+        self.assertIn("thread: THREADS_HOME must be an absolute path (or start with ~), not 'rel/threads'",
+                      self.die_line("list"))
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.hook()  # no SystemExit: a hook never fails the session
+        self.assertFalse(Path("rel").exists())
+
+    @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0, "needs POSIX modes, not root")
+    def test_unwritable_log_is_one_line_not_a_traceback(self):
+        self.run_cli("new", "A")
+        log = thread.home() / "a" / "log.txt"
+        log.chmod(0o444)
+        try:
+            for argv in (("note", "n"), ("checkpoint", "c"), ("close", "c")):
+                self.assertIn(f"thread: cannot write {log}: Permission denied", self.die_line(*argv))
+        finally:
+            log.chmod(0o600)
+
+    def test_failed_append_leaves_no_cut_entry(self):
+        self.run_cli("new", "A")
+        before, real, calls = self.log("a"), os.write, []
+
+        def short(fd, data):  # a disk that fills in the middle of the entry
+            if calls:
+                raise OSError(28, "No space left on device")
+            calls.append(1)
+            return real(fd, data[:10])
+        os.write = short
+        try:
+            with self.assertRaises(OSError):
+                thread.append("a", thread.entry(thread.now(), SID, "note", "x" * 100))
+        finally:
+            os.write = real
+        self.assertEqual(self.log("a"), before)
+
 
 if __name__ == "__main__":
     unittest.main()

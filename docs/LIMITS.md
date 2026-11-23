@@ -39,7 +39,7 @@ The short version is in the [README](../README.md#what-it-does-not-capture).
 - Commands and hooks of one session capture one at a time, through a lock file. A lock older than
   5 seconds is taken to be left by a process that died and is removed, so a command waits at most
   that long. A lock dated more than 5 seconds in the future (the clock was set back, or the folder
-  came from a machine whose clock is ahead) is removed the same way. `thread checkpoint` and `thread close` of one thread also run one at a time, through
+  came from a machine whose clock is ahead) is removed the same way. No wait for a lock is longer than 8 seconds, and a lock file that cannot be made (a read-only folder) ends the wait at once: a command prints `thread: cannot write <folder>: ...`, a hook writes `errors.log` and returns. `thread checkpoint` and `thread close` of one thread also run one at a time, through
   a lock file of the thread with the same 5 seconds: of two closes at the same moment one wins and
   the other fails with "thread <id> is closed; ...". `thread reopen` and `thread note` do not take it.
 - A background subagent's finishing notice and a message from another agent are logged with the

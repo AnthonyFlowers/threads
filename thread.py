@@ -25,7 +25,13 @@ HDR = re.compile(r"^=== (\S+) (\S+) (\S+)(?: (.*))? ===$")  # time, session, ent
 
 
 def home():
-    return Path(os.environ.get("THREADS_HOME") or Path.home() / ".threads")
+    v = os.environ.get("THREADS_HOME")
+    if not v:
+        return Path.home() / ".threads"
+    p = Path(os.path.expanduser(os.path.expandvars(v)))  # settings.json `env` and launchd expand nothing
+    if not p.is_absolute():  # a relative path would put thread data in every working folder (ADR 0001)
+        die(f"THREADS_HOME must be an absolute path (or start with ~), not {v!r}")
+    return p
 
 
 def die(msg):
@@ -168,8 +174,18 @@ def append(tid, text):
         fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
     try:
         data = text.encode("utf-8", "replace")  # a lone surrogate must not stop capture
-        while data:  # normally one write; a short write (full disk) must not cut an entry silently
-            data = data[os.write(fd, data):]
+        size, done = os.fstat(fd).st_size, 0
+        try:
+            while data:  # normally one write; a short write (full disk) must not cut an entry silently
+                n = os.write(fd, data)
+                done, data = done + n, data[n:]
+        except OSError:
+            # take the cut entry out again, so the retry does not store the turn twice; only when
+            # nothing was appended after it (another session writes the same log under its own lock)
+            with contextlib.suppress(OSError):
+                if done and os.fstat(fd).st_size == size + done:
+                    os.ftruncate(fd, size)
+            raise
     finally:
         os.close(fd)
 
@@ -430,6 +446,7 @@ def render(line, own=None, since=None, seen=None):
 
 
 LOCK_STALE = 5  # seconds; a capture takes well under one, so an older lock belongs to a dead process
+LOCK_WAIT = LOCK_STALE + 3  # seconds; never wait for ever: a hook that hangs holds up every turn
 _held = set()
 
 
@@ -447,11 +464,17 @@ def locked(sid, tid=None):
     if not tid:  # the folder of a thread is there, or the thread was removed: do not make it again
         home().mkdir(parents=True, exist_ok=True, mode=0o700)
         lock.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    end = time.monotonic() + LOCK_WAIT
     while True:
         try:
             os.close(os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
             break
-        except (FileExistsError, PermissionError):  # PermissionError: Windows, while it is being deleted
+        except (FileExistsError, PermissionError) as e:  # PermissionError: Windows, while it is being deleted
+            if isinstance(e, PermissionError) and not lock.exists() and not os.access(lock.parent, os.W_OK):
+                raise PermissionError(e.errno, "the folder is not writable (no lock file can be made)",
+                                      str(lock.parent)) from None
+            if time.monotonic() > end:
+                raise TimeoutError(e.errno, f"no lock after {LOCK_WAIT} s", str(lock)) from None
             try:
                 if abs(time.time() - lock.stat().st_mtime) > LOCK_STALE:  # abs: a lock dated in the future (clock set back, folder copied) is dead too
                     os.unlink(lock)  # its holder died; two waiters doing this at once is the rare leftover race
@@ -1213,6 +1236,8 @@ def cmd_hook(a):
                 print(f"Open threads for this folder: {', '.join(near[:8])}{more}. None is active, so "
                       f"this session is not captured. Open one only if you are asked to continue that "
                       f"work (`thread open <id>`).")
+    except SystemExit:
+        pass  # die() on the hook path (a relative THREADS_HOME): said on stderr, the session goes on
     except Exception:
         try:
             home().mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -1295,6 +1320,8 @@ def main(argv=None):
             a.fn(a)
         except ValueError as e:  # a damaged meta.json; the hook has its own handler and never gets here
             die(f"{e}: repair or remove the file under {home()}")
+        except OSError as e:  # a read-only log or folder, a full disk: one line, no traceback
+            die(f"cannot write {e.filename or 'the thread data'}: {e.strerror or e}")
     finally:
         sys.stdout = real
         try:

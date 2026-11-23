@@ -119,6 +119,9 @@ wrapper would run part of it as a command. For such a regex, ask the user for th
 2. `thread new <title> --kind <kind>`. The title becomes the id: 2 to 5 plain words
    (`billing null currency`), not a sentence. The kind is stored in lower case, and `--kind` filters ignore case.
 3. Write a first checkpoint: the goal, what "done" means, and the first step.
+   When the new thread continues earlier work and you seed it from an earlier thread's summary,
+   check the carried state against the disk and the repository first (branch, files, commands), as
+   when resuming: a summary can be stale. Copy into the first checkpoint only what you verified.
 
 `thread new` binds this session. If the session had no thread before, everything said so far in the
 session is captured too (the command says how many lines); tell the user. That includes anything the
@@ -242,5 +245,7 @@ the thread and the line of the entry's header.
 `thread close` needs the final summary on stdin, using the checkpoint template. Make the **first line
 the outcome**: `Outcome: done`, `Outcome: abandoned - <why>`, or `Outcome: superseded by <id>`.
 Write it for a reader who will never see this session: say where the result lives (commit, PR,
-file). The log is kept and stays searchable. Closing also detaches the session. If there is no
+file). Add a line for the standing rules and the method that the next thread of the same work
+needs, because a closed thread shows only its closing summary: `Standing rules: ...` (or: "Standing rules: see
+the first checkpoint", which `thread grep -t <id> --type checkpoint --oldest '.'` prints). The log is kept and stays searchable. Closing also detaches the session. If there is no
 active thread when the user asks to close one, ask which thread and use `thread close -t <id>`.
