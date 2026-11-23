@@ -27,8 +27,9 @@ class Case(unittest.TestCase):
         self.transcript = root / "claude" / "projects" / "p" / f"{SID}.jsonl"
         self.transcript.parent.mkdir(parents=True)
         self.transcript.write_text("")
+        # HOME too: if the code under test ever ignored THREADS_HOME, it must still not reach the real home
         self.env = {"THREADS_HOME": str(root / "threads"), "CLAUDE_CONFIG_DIR": str(root / "claude"),
-                    "CLAUDE_CODE_SESSION_ID": SID}
+                    "CLAUDE_CODE_SESSION_ID": SID, "HOME": str(root / "home"), "USERPROFILE": str(root / "home")}
         self.old = {k: os.environ.get(k) for k in self.env}
         os.environ.update(self.env)
 
@@ -429,8 +430,12 @@ class Case(unittest.TestCase):
                      isMeta=True, uuid="u-1"),  # written twice by Claude Code: one copy is kept
                  json.dumps({"type": "attachment", "sessionId": SID, "attachment":
                              {"type": "queued_command", "prompt": "<agent-message from=x>report B</agent-message>"}}) + "\n",
-                 json.dumps({"type": "attachment", "sessionId": SID, "attachment":
-                             {"type": "queued_command", "prompt": "<task-notification>dup</task-notification>"}}) + "\n",
+                 json.dumps({"type": "attachment", "sessionId": SID, "attachment":  # the same notice, queued
+                             {"type": "queued_command", "prompt": "<task-notification>background  shell exited</task-notification>"}}) + "\n",
+                 json.dumps({"type": "attachment", "sessionId": SID, "attachment": {"type": "queued_command",
+                             "prompt": "typed while the turn ran", "origin": {"kind": "human"}}}) + "\n",
+                 json.dumps({"type": "attachment", "sessionId": SID, "attachment": {"type": "edited_text_file",
+                             "prompt": "not a queued message"}}) + "\n",
                  msg("user", "injected skill body", isMeta=True),
                  json.dumps({"type": "system", "content": "system line"}) + "\n",
                  json.dumps({"type": "attachment", "attachment": "attached"}) + "\n",
@@ -439,8 +444,21 @@ class Case(unittest.TestCase):
         self.hook()
         log = self.log("a")
         self.assertEqual(self.kinds("a"), ["event", "user", "thinking", "tool_use", "tool_result", "subagent", "notification", "subagent",
-                          "subagent", "user"])
-        self.assertEqual((log.count("report A"), log.count("report B"), log.count(">dup<")), (1, 1, 0))
+                          "subagent", "user", "user"])
+        self.assertEqual((log.count("report A"), log.count("report B"), log.count("shell exited")), (1, 1, 1))
+        self.assertIn(" user ===\ntyped while the turn ran\n", log)  # the user's mid-turn message
+        self.assertNotIn("not a queued message", log)
+        # a queued copy and its user line can fall into different capture runs
+        self.say(json.dumps({"type": "attachment", "sessionId": SID, "attachment":
+                             {"type": "queued_command", "prompt": "<agent-message>report C</agent-message>"}}) + "\n")
+        self.hook()
+        self.say(msg("user", "Another Claude session sent a message:\n<agent-message>report C</agent-message>",
+                     isMeta=True),
+                 msg("user", "<agent-message>report C</agent-message>"), msg("user", "go on"), msg("user", "go on"))
+        self.hook()
+        log = self.log("a")
+        self.assertEqual(log.count("<agent-message>report C</agent-message>"), 2)  # queued + the prefixed form
+        self.assertEqual(log.count("\ngo on\n"), 2)  # the user may say the same thing twice
         self.assertIn("\n === 2026-01-01T00:00:00Z abcdefgh note ===\n", log)  # escaped, not an entry
         self.assertIn(" tool_use Ba_sh_x u1 ===\na: 1\n=== 2026-01-01T00:00:00.000Z sess-1 tool_result u1 ===", log)
         self.assertIn("ok\n[image]\n", log)
@@ -457,10 +475,15 @@ class Case(unittest.TestCase):
                "THREADS_HOME=/t thread grep x --all", 'py "C:/t/thread.py" grep x', "ls\nthread grep x"]
         miss = ['git commit -m "fix thread grep paging"', 'grep -rn "thread grep" README.md',
                 "echo see the thread grep docs", 'thread note "use thread grep later"', "threads grep x"]
+        hit += ["rtk thread grep foo", "env -u X THREADS_HOME=/tmp/t python3 thread.py grep foo",
+                "for t in a b; do thread grep $t; done", "if true; then thread grep x; fi", "time thread grep x",
+                "echo `thread grep x`", "ls | xargs thread grep", "uv run thread grep x", "thread grep 'a|b' --count"]
+        miss += ["git commit -m 'docs; thread grep is skipped'", "git commit -m 'one\nthread grep two'",
+                 "echo 'see (thread grep x)'", "copy thread grep notes.txt", "cat <<'EOF'\nthread grep x\nEOF"]
         for c in hit:
-            self.assertTrue(thread.GREP_CALL.search(c), c)
+            self.assertTrue(thread.runs_grep(c), c)
         for c in miss:
-            self.assertFalse(thread.GREP_CALL.search(c), c)
+            self.assertFalse(thread.runs_grep(c), c)
         self.run_cli("new", "A")
         use = lambda i, c: msg("assistant", [{"type": "tool_use", "id": i, "name": "Bash", "input": {"command": c}}])
         res = lambda i, t: msg("user", [{"type": "tool_result", "tool_use_id": i, "content": t}])
@@ -630,6 +653,63 @@ class Case(unittest.TestCase):
                  use("g1", "Bash", {"command": "cd /r && thread grep Zed"}), res("g1", "a:9 Zed3"))
         self.hook()
         self.assertEqual(self.run_cli("grep", "Zed", "--count").splitlines()[0], "3")  # Zed1 and Zed2 (twice)
+        self.run_cli("note", stdin="first line\nsecond mark\nthird\nfourth mark\n")
+        page = self.run_cli("grep", "mark").splitlines()
+        self.assertEqual([re.sub(r"\d+: ", "", l) for l in page[1:-1]],  # context reaches the entry's first line
+                         ["  first line", "> second mark", "  third", "> fourth mark"])
+        page = self.run_cli("grep", "mark", "--context", "0").splitlines()
+        self.assertEqual([re.sub(r"\d+: ", "", l) for l in page[1:-1]], ["> second mark", "  --", "> fourth mark"])
+        # newest first is by entry time, not by thread name
+        self.run_cli("new", "Zzz")
+        self.say(msg("user", "an old mark, in a thread that sorts last"))
+        self.hook()
+        page = self.run_cli("grep", "mark", "--all", "--type", "user,note")
+        self.assertLess(page.index("fourth mark"), page.index("an old mark"))
+
+    def test_reminder_folder_match_ids_types_and_fork_boundary(self):
+        base = Path(self.tmp.name).resolve()
+        for d in ("app", "app2", "app/sub"):
+            (base / d).mkdir(parents=True)
+        old = os.getcwd()
+        try:
+            os.chdir(base / "app")
+            self.run_cli("new", "In app")
+            os.chdir("/")
+            self.run_cli("new", "In root")
+        finally:
+            os.chdir(old)
+        self.as_session("sess-2")
+        start = lambda cwd: self.hook("SessionStart", source="startup", cwd=str(cwd))
+        self.assertIn("this folder: in-app. None", start(base / "app"))
+        self.assertIn("this folder: in-app. None", start(base / "app" / "sub"))
+        self.assertEqual(start(base / "app2"), "")  # a path test, not a string prefix
+        self.assertEqual(start(base), "")
+        # calls without an id: one grep call must not hide the others
+        self.as_session(SID)
+        use = lambda c: msg("assistant", [{"type": "tool_use", "name": "Ba\x1b[31msh", "input": {"description": "d", "command": c}}])
+        res = lambda t: msg("user", [{"type": "tool_result", "content": t}])
+        self.say(use("thread grep x"), res("Qgrep"), use("ls"), res("Qls"))
+        self.hook()
+        out = self.run_cli("grep", "Q(grep|ls)|command: ls")
+        self.assertIn("Qls", out)
+        self.assertNotIn("\x1b", out)  # a control character in a tool name does not reach the terminal
+        with self.assertRaises(SystemExit):
+            self.run_cli("grep", "x", "--type", "decision")
+        # with ids, `command` need not be the first key
+        self.say(msg("assistant", [{"type": "tool_use", "id": "k1", "name": "Bash",
+                                    "input": {"description": "d", "command": "thread grep Zq"}}]),
+                 msg("user", [{"type": "tool_result", "tool_use_id": "k1", "content": "Zq found"}]))
+        self.hook()
+        self.assertEqual(self.run_cli("grep", "Zq", "--count").strip(), "0")
+        # a fork: the parent's lines of the very second the fork began are still the parent's
+        fork = self.transcript.with_name("sess-3.jsonl")
+        fork.write_text("")
+        self.as_session("sess-3")
+        self.hook("SessionStart", source="fork")
+        since = thread.state("sess-3")["since"]
+        fork.write_text(msg("user", "parent, same second").replace(SID, "sess-3").replace("2026-01-01T00:00:00", since[:19]))
+        self.run_cli("new", "F")
+        self.assertNotIn("parent, same second", self.log("f"))
 
     def test_printed_details(self):
         self.run_cli("new", "A")

@@ -32,8 +32,10 @@ mechanism-by-mechanism comparison and a recall test on real transcripts.
 - A later session runs `thread open`, reads the summary, and uses `thread grep` for the details.
 - After Claude Code compacts the context, a hook re-injects the summary, says how many entries are
   newer than it, and reminds the agent to grep.
-- When a session starts with no active thread in a folder where open threads were started, a hook
-  prints one line naming them. The agent opens one only if you ask to continue that work.
+- When a session starts with no active thread in a folder where open threads were started (that
+  folder or one below it), a hook prints one line naming them. The agent opens one only if you ask
+  to continue that work. When a session with an active thread starts or resumes, the hook prints
+  one line naming it.
 
 ## Install
 
@@ -43,6 +45,8 @@ session it is in, so nothing is captured). Nothing is downloaded.
 ### macOS and Linux
 
 1. Put `thread.py` on your `PATH` as `thread`:
+
+   From this folder:
 
    ```sh
    mkdir -p ~/.local/bin
@@ -61,7 +65,6 @@ session it is in, so nothing is captured). Nothing is downloaded.
 
 3. Merge the `hooks` block of [hooks.json](hooks.json) into `~/.claude/settings.json`. If you already
    have hooks for an event, append the whole `{ ... }` group from `hooks.json` to that event's list.
-   On Claude Code older than 2.1.78 the `StopFailure` entry is skipped with a warning; that is harmless.
 
 4. Optional: allow the command, so each call does not ask for permission. Add `"Bash(thread:*)"` to
    `permissions.allow` in `~/.claude/settings.json`.
@@ -98,6 +101,8 @@ Not tested: real Claude Code sessions on Windows, and PowerShell 7.
    #!/bin/sh
    MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' python "$(dirname "$0")/thread.py" "$@" || exit 1
    ```
+
+   If only `py` works on your machine, write `py` instead of `python` in both wrappers.
 
    The `|| exit` parts matter. If Python cannot be started or the path is wrong, the exit code is
    2, and Claude Code reads exit code 2 from a hook as "block the compaction" (and, in some cases,
@@ -160,9 +165,10 @@ captures by itself and would hide a missing hook.
 - **Upgrade:** replace `thread.py` and the skill folder with the new copies. Merge `hooks.json`
   again only when the release notes in `docs/LOG.md` say it changed.
 - **Move to another machine:** copy `~/.threads` without its `.sessions` folder.
-- **Clean up:** `.sessions` gains one small file per session that was ever bound; delete the folder
+- **Clean up:** `.sessions` gains one small file per session that was ever bound or forked; delete the folder
   when no Claude Code session is running. `log.txt` is plain text and nothing indexes it, so you
-  can edit it by hand, for example to remove a secret that was printed.
+  can edit it by hand, for example to remove a secret that was printed (line numbers cited in
+  summaries then shift).
 
 ## Troubleshooting
 
@@ -183,7 +189,7 @@ captures by itself and would hide a missing hook.
 | `thread open <id>` | Print the summary and what came after the last checkpoint; bind this session, capturing from now on. A closed thread is shown read-only. A unique id prefix is enough. |
 | `thread note <text>` | Append a note (text as arguments or on stdin). Prints how many entries are newer than the last checkpoint. |
 | `thread checkpoint` | Replace the summary (text as arguments or on stdin). Warns above 6000 characters, the amount re-injected after a compaction. |
-| `thread grep <regex>` | Case-insensitive search of the log, newest entry first (`--oldest` reverses). Matches are grouped under their entry's header; a result's header also shows the call that produced it. `--count` prints the total, then a breakdown by entry type (and by thread with `--all`). `--max N` (10, max 30), `--offset N`, `--context N` (1, max 3), `--type user,assistant,note` to search only those entry types, `--all` for every thread. A page ends early at about 6000 characters; the footer gives the `--offset` of the first match not shown. Context lines stay inside the matching entry. Printed lines are clipped to 400 characters. Earlier `thread grep` calls are not searched. Options go before a `--`. |
+| `thread grep <regex>` | Case-insensitive search of the log, newest entry first (`--oldest` reverses). Matches are grouped under their entry's header; a result's header also shows the call that produced it. `--count` prints the total, then a breakdown by entry type when there is more than one (and by thread with `--all`). `--max N` (10, max 30), `--offset N`, `--context N` (1, max 3), `--type user,assistant,note` to search only those entry types, `--all` for every thread. A page ends early at about 6000 characters; the footer gives the `--offset` of the first match not shown. Context lines stay inside the matching entry. Printed lines are clipped to 400 characters. Earlier `thread grep` calls are not searched. Options go before a `--`. |
 | `thread detach` | Stop capturing this session. |
 | `thread close` | Close with a final summary (arguments or stdin). The log is kept. |
 | `thread reopen <id>` | Reopen a closed thread and bind this session. Fails on an open thread. |
@@ -200,7 +206,7 @@ still adds to one.
 
 ```
 ~/.threads/
-  <id>/meta.json     id, title, kind, status, created, cwd, uid, closes
+  <id>/meta.json     id, title, kind, status, created, cwd, uid, closes (after a close)
   <id>/log.txt       append-only; each entry starts "=== <time> <session id, 8 chars> <entry type> [tool] [call id] ==="
   <id>/summary.md    current summary
   .sessions/         which thread each session is bound to, and how much of it is captured

@@ -92,10 +92,10 @@ session is captured too (the command says how many lines); tell the user.
 
 1. If the user gave no id, run `thread list` (`--all` if nothing fits) and match on the title. If
    two or more fit, ask. To find a thread by content: `thread grep --all --count '<word>'`.
-2. `thread open <id-or-unique-prefix>`. Capture starts at this point; what the session did before
-   is not logged, so note anything from it that matters. It prints the summary, then the count of entries after the
+2. `thread open <id-or-unique-prefix>`. It prints the summary, then the count of entries after the
    last checkpoint with their notes and latest messages. A few are normal (the end of the turn that
-   wrote the checkpoint); many mean the summary is stale.
+   wrote the checkpoint); many mean the summary is stale. Capture starts at this point: what the
+   session did before is not logged, so note anything from it that matters.
 3. Tell the user in two or three lines where the work stands and the next step. Grep for what you
    still need. Checkpoint once you have caught up.
 
@@ -133,30 +133,29 @@ that were actually used and try alternatives: `thread grep 'timeout|timed out|ET
 - Always single-quote the regex. Put `--` before a pattern that starts with `-`, with any options
   ahead of it: `thread grep --count -- '--max'`.
 - A tool call is stored as `key: value` lines (`command: ...`, `file_path: ...`), so a command or
-  path can be searched as typed. Its header and the header of its result carry the same call id;
-  grep that id to see both.
-
-- `--count` first when a pattern may be broad.
+  path can be searched as typed. A call and its result carry the same call id in their headers;
+  grep that id to see both (with `--context 3` for more of each).
+- `--count` first when a pattern may be broad. It prints the total and, when the matches are of
+  more than one entry type, how many are of each; page footers show the same. With `--all` it also
+  lists the matches per thread, which is how to find the thread a subject belongs to.
 - Matches come newest entry first, 10 per page, fewer when the lines are long; follow the
   `--offset N` hint in the footer for older ones; `--max` up to 30. For "what was said first", add
   `--oldest`.
-- `--count` and every page footer break the matches down by entry type. When most of them are
-  `tool_use` or `tool_result`, narrow with `--type`.
 - `--type user,assistant,note` searches only what was said and noted, leaving out file contents
   and command output. Use it to find a decision. The user's answers to question prompts are
   `tool_result` entries, so for "what did the user answer" search `--type tool_result,user`.
   Types: `user`, `assistant`, `thinking`, `tool_use`, `tool_result`, `subagent`, `notification`,
-  `compaction`, `note`, `checkpoint`, `event`.
-- With `--all`, `--count` also lists the matches per thread: use it to find the thread a subject
-  belongs to.
+  `compaction`, `note`, `checkpoint`, `event`. `subagent` holds background-agent notices and
+  messages from other agents; a foreground subagent's report is the `tool_result` of its Agent call.
 - `--context N` sets the lines shown around each match, inside its entry: 0 to 3, default 1.
-- `--all` searches every thread, open and closed. Use it to find earlier work on the same subject.
+- `--all` searches every thread, open and closed.
 - Matches of one entry are listed under its header (`thread:line`, time, session, entry type), each
-  line with its line number, `>` on the matching lines and `--` where lines are left out. The
-  header of a tool result ends with `<- ` and the call that produced it.
+  line with its line number and `>` on the matching lines. `--` separates entries; an indented
+  `--` marks lines left out inside one. The header of a tool result ends with `<- ` and the call
+  that produced it. When the match is in the header itself (a call id, a tool name), no line
+  carries `>`.
 - Printed lines are clipped to 400 characters. For the full text, read
   `~/.threads/<thread>/log.txt` at the line number shown.
-- Earlier `thread grep` commands and their output are not searched.
 
 ### Closing
 

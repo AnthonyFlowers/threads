@@ -6,6 +6,7 @@ all under ~/.threads/<id>/. Standard library only, no network. See README.md.
 """
 import argparse
 import glob
+import hashlib
 import json
 import os
 import re
@@ -15,6 +16,8 @@ import traceback
 from pathlib import Path
 
 CAP = 6000  # max characters printed back to the agent per page (the paper's figure)
+TYPES = ("user", "assistant", "thinking", "tool_use", "tool_result", "subagent", "notification",
+         "compaction", "note", "checkpoint", "event")
 HDR = re.compile(r"^=== (\S+) (\S+) (\S+)(?: (.*))? ===$")  # time, session, entry type, tool name
 
 
@@ -79,18 +82,25 @@ def append(tid, text):
         # newline: parallel writers lose data. FILE_APPEND_DATA appends atomically in the kernel.
         import ctypes
         import msvcrt
-        create = ctypes.windll.kernel32.CreateFileW
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create = k32.CreateFileW
         create.restype = ctypes.c_void_p
         create.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p,
                            ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p]
         handle = create(path, 0x4, 0x7, None, 4, 0x80, None)  # append, share all, OPEN_ALWAYS
         if handle in (None, ctypes.c_void_p(-1).value):
-            raise ctypes.WinError()
-        fd = msvcrt.open_osfhandle(handle, os.O_BINARY)
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            fd = msvcrt.open_osfhandle(handle, os.O_BINARY)
+        except OSError:
+            k32.CloseHandle(ctypes.c_void_p(handle))
+            raise
     else:
         fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
     try:
-        os.write(fd, text.encode("utf-8", "replace"))  # a lone surrogate must not stop capture
+        data = text.encode("utf-8", "replace")  # a lone surrogate must not stop capture
+        while data:  # normally one write; a short write (full disk) must not cut an entry silently
+            data = data[os.write(fd, data):]
     finally:
         os.close(fd)
 
@@ -135,7 +145,7 @@ def generation(tid):
 
 def summary(tid):
     p = home() / tid / "summary.md"
-    return p.read_text(encoding="utf-8") if p.exists() else ""
+    return read(p) if p.exists() else ""
 
 
 def entries(tid):
@@ -173,7 +183,7 @@ def state(sid):
     p = state_path(sid)
     try:
         st = json.loads(read(p)) if p and p.exists() else None
-    except ValueError:
+    except (ValueError, FileNotFoundError):
         st = None
     return st if isinstance(st, dict) else None  # corrupt state file: start over, do not crash
 
@@ -208,8 +218,22 @@ def flat(content):
 
 # `thread grep` in command position: at the start of a line or after ; & | ( and, optionally,
 # VAR=value assignments, a python launcher and a path. A mere mention in an argument does not count.
-GREP_CALL = re.compile(r"""(?m)(?:^|[;&|(])\s*(?:\w+=\S*\s+)*(?:\S*py\S*\s+)?["']?(?:\S*[/\\])?"""
-                       r"""thread(?:\.py|\.cmd)?["']?\s+grep\b""")
+GREP_CALL = re.compile(
+    r"""(?m)(?:^|[;&|(`])\s*"""                                                 # command position
+    r"""(?:(?:rtk|time|command|exec|xargs|sudo|do|then|else)\s+|env\s+(?:-u\s+\S+\s+|-\S+\s+)*)*"""
+    r"""(?:\w+=\S*\s+)*"""                                                      # VAR=value
+    r"""(?:(?:\S*python[\d.]*(?:\.exe)?|py(?:\.exe)?)\s+(?:-\S+\s+)*|uv\s+run\s+)?"""  # launcher
+    r"""["']?(?:\S*[/\\])?thread(?:\.py|\.cmd)?["']?\s+grep\b""")
+HEREDOC = re.compile(r"<<-?\s*['\"]?(\w+)['\"]?[^\n]*\n.*?\n\s*\1\b", re.S)
+QUOTED = re.compile(r"""'[^']*'|"(?:[^"\\]|\\.)*\"""")
+
+
+def runs_grep(command):
+    """True when a shell command runs `thread grep`. Text that only mentions it (a heredoc body,
+    a quoted commit message) does not count."""
+    command = HEREDOC.sub("", command)
+    command = QUOTED.sub(lambda m: "''" if "grep" in m[0] else m[0], command)
+    return bool(GREP_CALL.search(command))
 
 
 def tool_input(inp):
@@ -244,15 +268,19 @@ def render(line, own=None, since=None, seen=None):
         seen.add(d["uuid"])
     if own and d.get("sessionId") and d["sessionId"] != own:
         return ""
-    if d.get("type") == "attachment":  # a queued message from another agent is delivered this way
-        prompt = (d.get("attachment") or {}).get("prompt") if isinstance(d.get("attachment"), dict) else None
-        if not (isinstance(prompt, str) and prompt.lstrip().startswith(REPORT)):
+    queued = False
+    if d.get("type") == "attachment":
+        # whatever arrives while a turn is running is delivered as a queued attachment: the
+        # user's own words, a subagent's notice or report
+        att = d.get("attachment")
+        prompt = att.get("prompt") if isinstance(att, dict) and att.get("type") == "queued_command" else None
+        if not isinstance(prompt, str):
             return ""
-        d = {**d, "type": "user", "message": {"content": prompt}}
+        d, queued = {**d, "type": "user", "message": {"content": prompt}}, True
     if d.get("type") not in ("user", "assistant"):
         return ""
     ts, sid, role = "".join(str(d.get("timestamp") or now()).split()), d.get("sessionId"), d["type"]
-    if since and d.get("timestamp") and ts[:19] < since[:19]:
+    if since and d.get("timestamp") and ts[:19] <= since[:19]:
         return ""
     content = (d.get("message") or {}).get("content")
     if isinstance(content, str):
@@ -264,7 +292,14 @@ def render(line, own=None, since=None, seen=None):
         t = b.get("type")
         if t == "text":
             text = b.get("text", "")
+            text = text if isinstance(text, str) else json.dumps(text, ensure_ascii=False)
             start, kind = text.lstrip(), role
+            if role == "user" and seen is not None:
+                # the same message can come once queued and once as a user line: keep one
+                key = hashlib.sha1(" ".join(text.split())[:120].encode("utf-8", "replace")).hexdigest()[:16]
+                if "q:" + key in seen or (queued and "u:" + key in seen):
+                    continue
+                seen.add(("q:" if queued else "u:") + key)
             if role == "user":  # not everything on a user line was said by the user
                 if d.get("isCompactSummary"):
                     kind = "compaction"  # Claude Code's own summary at a compaction
@@ -306,7 +341,7 @@ def capture(sid, tpath=None):
         first = st.get("offset", 0)
         if not isinstance(first, int) or not 0 <= first <= len(lines):
             first = 0  # the transcript was replaced by a shorter one, or the state is damaged
-        parts, seen = [], set()
+        parts, seen = [], set(st.get("recent") or [])
         for n, line in enumerate(lines[first:] if tid else [], first + 1):
             try:
                 parts.append(render(line, sid, st.get("since"), seen))
@@ -319,6 +354,8 @@ def capture(sid, tpath=None):
         # shortcut: no lock, two captures of one session at the same instant can duplicate
         # entries; add a lock file if that ever shows up in a log.
         st["offset"] = len(lines)  # with no thread (detached) the lines are skipped for good
+        # remember recent message texts, so a queued copy and its user line match across captures
+        st["recent"] = sorted(k for k in seen if k[:2] in ("q:", "u:"))[-200:]
         write(state_path(sid), json.dumps(st))
         return len(parts)
     write(state_path(sid), json.dumps(st))
@@ -443,7 +480,7 @@ def cmd_new(a):
         n += 1
         tid = f"{base}-{n}"
     save_meta({"id": tid, "title": title, "kind": a.kind or "", "status": "open",
-               "created": now(), "cwd": os.getcwd(), "uid": os.urandom(4).hex()})
+               "created": now(), "cwd": os.path.realpath(os.getcwd()), "uid": os.urandom(4).hex()})
     sid = session_id()
     was = active(sid)
     n = bind(sid, tid, backfill=True)
@@ -525,9 +562,6 @@ def clip(line, start=0):
     return ("…" if s else "") + line[s:s + 400] + "…"
 
 
-HEREDOC = re.compile(r"<<-?\s*['\"]?(\w+)['\"]?[^\n]*\n.*?\n\s*\1\b", re.S)
-
-
 def cmd_grep(a):
     try:
         rx = re.compile(a.pattern, re.I)
@@ -538,6 +572,8 @@ def cmd_grep(a):
     if a.offset <= 0:
         try_capture(session_id())  # page 1 sees the turn in progress; later pages need a stable log
     types = {t for t in (a.type or "").replace(",", " ").split()}
+    if types - set(TYPES):
+        die(f"unknown entry type {', '.join(sorted(types - set(TYPES)))}; the types are {', '.join(TYPES)}")
     ctx = min(max(a.context, 0), 3)
     hits = []  # (entry time, thread, entry line, line, header, {line: text} with context)
     by_type, by_thread = {}, {}
@@ -552,23 +588,24 @@ def cmd_grep(a):
         for i, line in enumerate(lines):
             if heads[i]:
                 f = line.split()
-                head, start, kind = line, i, f[3]
+                head, start, kind = printable(line), i, f[3]
                 skip = bool(types) and kind not in types
-                if kind == "tool_use":
+                # the call id: `tool_use <name> <id>` or `tool_result <id>`; "-" when it had none
+                cid = f[-2] if len(f) == (7 if kind == "tool_use" else 6) and f[-2] != "-" else None
+                if kind == "tool_use" and cid:
                     j = i + 1
                     while j < len(lines) and not heads[j]:
                         j += 1
-                    calls[f[-2]] = f"{f[4]}: {clip(lines[i + 1] if j > i + 1 else '')[:160]}"
-                    cmd = "\n".join(lines[i + 1:j])
-                    cmd = cmd[9:] if cmd.startswith("command: ") else ""
+                    c = next((n for n in range(i + 1, j) if lines[n].startswith("command: ")), None)
+                    calls[cid] = f"{f[4]}: {clip(lines[c if c else i + 1] if j > i + 1 else '')[:160]}"
                     # an earlier `thread grep` call holds its own pattern, and its result repeats
                     # the log: searching them would make the match count grow with every page
-                    if f[4] in ("Bash", "PowerShell") and GREP_CALL.search(HEREDOC.sub("", cmd)):
-                        own_ids.add(f[-2])
-                if kind in ("tool_use", "tool_result") and f[-2] in own_ids:
+                    if c and f[4] in ("Bash", "PowerShell") and runs_grep("\n".join(lines[c:j])[9:]):
+                        own_ids.add(cid)
+                if kind in ("tool_use", "tool_result") and cid in own_ids:
                     skip = True
-                if kind == "tool_result" and f[-2] in calls:
-                    head = f"{line}  <- {calls[f[-2]]}"  # which call printed this
+                if kind == "tool_result" and cid in calls:
+                    head = f"{head}  <- {calls[cid]}"  # which call printed this
             m = None if skip else rx.search(line)
             if not m:
                 continue
@@ -691,17 +728,22 @@ def cmd_hook(a):
         elif tid:
             print(f"Active thread: {tid} ({meta(tid)['title']}). This session is captured into it.")
         else:
-            here = os.path.normcase(os.path.abspath(d.get("cwd") or os.getcwd()))
-            near = []
+            norm = lambda path: os.path.normcase(os.path.realpath(path)).rstrip(os.sep)
+            here, near = norm(d.get("cwd") or os.getcwd()), []
             for t in all_ids():
                 try:
                     m = meta(t)
-                    if m["status"] == "open" and here.startswith(os.path.normcase(m.get("cwd") or "\0")):
+                    c = norm(m["cwd"]) if m.get("cwd") else ""
+                    # the same folder or one above it; a thread started in a root folder would match
+                    # everything, so it is left out
+                    if m["status"] == "open" and os.path.dirname(c) != c and c and \
+                            (here == c or here.startswith(c + os.sep)):
                         near.append(t)
                 except (OSError, ValueError, KeyError, TypeError):
                     pass
             if near:
-                print(f"Open threads started in this folder: {', '.join(near[:8])}. None is active, so "
+                more = f" (and {len(near) - 8} more: `thread list`)" if len(near) > 8 else ""
+                print(f"Open threads started in this folder: {', '.join(near[:8])}{more}. None is active, so "
                       f"this session is not captured. Open one only if the user asks to continue that "
                       f"work (`thread open <id>`).")
     except Exception:

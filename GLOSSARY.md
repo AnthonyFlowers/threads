@@ -25,20 +25,29 @@ To leave a session with no active thread, so that nothing more of it is captured
 _Avoid_: Unbind, pause
 
 **Log**:
-The append-only record of a thread. Nothing in it is ever edited, shortened or removed.
+The append-only record of a thread. The tool never edits, shortens or removes anything in it.
 _Avoid_: History, transcript (the transcript belongs to a session)
 
 **Entry**:
 One record in the log.
-_Avoid_: Line, message, record
+_Avoid_: Line, message
 
 **Entry type**:
-What an entry records: a user or assistant message, thinking, a tool call, a tool result, a subagent's report, a notification, a compaction summary written by Claude Code, a note, a checkpoint, or an event (the thread was created, closed or reopened, or capture skipped something).
+What an entry records. The types are: a user message (`user`), an assistant message (`assistant`), thinking (`thinking`), a tool call (`tool_use`), a tool result (`tool_result`), a notice or message from another agent (`subagent`), a notice from a background command (`notification`), a summary Claude Code wrote at a compaction (`compaction`), a note (`note`), a checkpoint (`checkpoint`), and an event: the thread was created, closed or reopened, or capture skipped something (`event`).
 _Avoid_: Kind (a kind belongs to a thread), role
 
 **Capture**:
 The entries taken from a session's transcript without the agent's involvement. Text is taken as the transcript holds it; images are recorded only as a marker, and lines that Claude Code injects are left out.
 _Avoid_: Recording, sync
+
+**Fork**:
+A session that Claude Code starts as a copy of another session. It has its own id and no active thread.
+
+**Compaction**:
+Claude Code's replacement of a session's earlier context by a summary. The summary is logged; the thread's own summary is put back into context afterwards.
+
+**Call id**:
+The identifier that a tool call and its result share, shown in both entry headers.
 
 **Backfill**:
 Capture of the part of a session that happened before it was bound to its first thread. Only creating a thread backfills; opening one does not.

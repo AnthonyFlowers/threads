@@ -75,6 +75,22 @@
     heredocs that only mention `thread grep`; replayed transcript lines were stored twice;
     background shell notices were labelled `subagent` (now `notification`). Added `--oldest`.
     Tests 27 -> 28.
+- 2026-11-22: Fourth review (two fresh subagents, commits 5b53833..f22fb19). Fixed:
+  - Messages delivered while a turn runs (queued attachments) were dropped unless they were agent
+    reports: the user's own mid-turn messages (35 of 41 in the owner's transcripts existed nowhere
+    else) and 725 of 822 subagent and shell notices. All queued messages are now captured, with a
+    text match so that a queued copy and its user line give one entry.
+  - Folder reminder used a string prefix (`/work/app2` matched `/work/app`); now a path test on
+    real paths, and a thread started in a root folder is left out.
+  - Own-grep rule: quoted mentions no longer count; `rtk`, `env`, loops, `xargs` and `command` as a
+    later key are recognised; calls without an id no longer hide each other.
+  - Also: unknown `--type` is an error; control characters in headers are not printed; a fork drops
+    parent lines of the fork's own second; short writes are completed; Windows error reporting.
+  - **Mistake recorded:** an earlier mutation check (22 Nov, 13:11-13:21) wrote 148 test threads
+    into the real `~/.threads`, because some mutants disabled the `THREADS_HOME` lookup. The owner
+    had it deleted. The tests now also point `HOME` and `USERPROFILE` at their temp folder, so the
+    code under test cannot reach the real home even when that lookup is broken.
+  - Tests 28 -> 29.
 
 ## Research notes
 

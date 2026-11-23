@@ -9,7 +9,7 @@ The short version is in the [README](../README.md#what-it-does-not-capture).
 - Only the main session is captured. A subagent's work appears as the prompt it was given and the
   report it handed back; its internal steps are not captured.
 - Capture runs when a turn ends (also when it ends in an API error), before compaction, at session
-  end, and on `new`, `open` (of an open thread), `reopen`, `note`, `checkpoint`, `close`, `detach`
+  start and end, and on `new`, `open` (of an open thread), `reopen`, `note`, `checkpoint`, `close`, `detach`
   and the first page of `grep`.
 - `thread new` in a session that had no thread captures the session from its start. `thread open`
   and `thread reopen` capture from that moment on; what the session did before is not stored.
@@ -20,9 +20,13 @@ The short version is in the [README](../README.md#what-it-does-not-capture).
   start (duplicate entries); if it rewrites it at the same or greater length, new lines can be missed.
 - Two captures of one session at the same moment (for example parallel subagents each running a
   `thread` command) can store the same lines more than once.
-- A subagent's finishing notice and the report it hands back are logged with the entry type
-  `subagent`; a background shell's notice as `notification`; Claude Code's own summary at a
-  compaction as `compaction`. Slash commands you type and their local output are `user` entries.
+- A background subagent's finishing notice and a message from another agent are logged with the
+  entry type `subagent`; the report a foreground subagent returns is the `tool_result` of its Agent
+  call; a background shell's notice is `notification`; Claude Code's own summary at a compaction is
+  `compaction`. Slash commands you type and their local output are `user` entries.
+- A message that arrives while a turn is running (your own words, a notice, a report) can appear in
+  the transcript twice, once queued and once as a user line. One copy is kept, matched on its first
+  120 characters among the last 200 messages of the session.
 - When Claude Code writes the same transcript line twice, one copy is kept, but only within one
   capture run.
 - Thinking is stored only when the transcript holds its text. Current Claude Code leaves most
@@ -44,8 +48,10 @@ The short version is in the [README](../README.md#what-it-does-not-capture).
 - `thread grep` calls and their output are stored but never searched, because the output only
   repeats the log. This applies to any Bash or PowerShell command that runs `thread grep`, alone or
   chained (`cd x && thread grep y`), so other output of that command cannot be found by a search
-  either. A command that only mentions the words (a commit message, a heredoc body, a file being
-  written) is not affected.
+  either. A command that only mentions the words inside quotes or a heredoc (a commit message, a
+  file being written) is not affected. The rule recognises the usual ways of running a command
+  (after `;`, `&&`, `|`, in a loop, behind `env`, `rtk`, `time`, `xargs`, a Python launcher); an
+  unusual wrapper is not recognised, and that call's output is then searched like any other.
 - Inside an entry, unusual line separators (form feed, U+2028, CR) are stored as newlines, and a
   body line that starts with `=== ` gains a leading space.
 - A resumed session keeps its id and its binding. A forked session (`--fork-session`, `/branch`)
@@ -70,12 +76,12 @@ Each of these was considered and left out. Add one when its trigger shows up.
 | Secret redaction | Scanning is unreliable and the same text is already in Claude Code's transcripts. | Logs must leave the machine, or policy requires it. |
 | Truncation of long tool outputs | The point of the pattern is a log that keeps what the transcript holds. | Disk use becomes a problem. |
 | Compressing or archiving closed threads | Plain files are simpler to search and inspect. | `~/.threads` grows past a few GB. |
-| Plugin packaging | Work may block plugin marketplaces; three manual steps are enough. | Several people install it. |
+| Plugin packaging | Work may block plugin marketplaces; a few manual steps are enough. | Several people install it. |
 | An install command | Code that edits `settings.json` is a risk for little gain. | The manual steps cause errors. |
 | More statuses (paused, blocked) | Open and closed cover the lifecycle; the summary says the rest. | `thread list` cannot answer "what is waiting". |
 | Per-kind templates | Kind is only a label. | Bug and project summaries clearly need different headings. |
 | Parent/child links | Threads are flat; name the related id in a note. | Related threads become hard to find with `grep --all`. |
-| Subagent capture | Logs would grow many times over. | A subagent's internal steps are needed for recall. |
-| Locking | Appends are one write per entry (atomic on POSIX); the summary is last-writer-wins with every version in the log. Two captures of the same session at the same instant can duplicate entries. | Duplicate or lost entries appear. |
+| Capture of subagents' internal steps | Logs would grow many times over. | A subagent's internal steps are needed for recall. |
+| Locking | Appends are one write per entry (atomic on POSIX, and on Windows through `FILE_APPEND_DATA`); the summary is last-writer-wins with every version in the log. Two captures of the same session at the same instant can duplicate entries. | Duplicate or lost entries appear. |
 | `thread delete` | `rm -rf ~/.threads/<id>` does it. | A retention rule needs an audited command. |
 | `thread rename` | Ids are rarely typed in full; a prefix works. | A title turns out badly wrong often. |
