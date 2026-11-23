@@ -153,8 +153,8 @@ captures by itself and would hide a missing hook.
 
 - **Every new session, every `/clear` and every fork starts with no active thread.** Until you say
   "open the X thread" or "continue the X work" (or start a new one), that session is not captured.
-  With the hooks installed, the agent is told in one line when open threads exist for the folder;
-  it will not open one unasked. To check, ask the agent for `thread list`: `*` marks the active
+  With the hooks installed, the agent is told in one line when open threads exist for the folder
+  (the session's folder is the thread's, above it or below it); it will not open one unasked. To check, ask the agent for `thread list`: `*` marks the active
   thread. A `thread list` in your own
   terminal never shows `*`, because the terminal is not a Claude Code session.
 - `thread list` shows open threads; `thread list --all` includes closed ones. To find a thread by
@@ -186,9 +186,9 @@ captures by itself and would hide a missing hook.
 | Command | Does |
 |---|---|
 | `thread new <title> [--kind K]` | Create a thread and bind this session. A session with no earlier thread is captured from its start (the command says how many lines). The title becomes the id (lower case, at most 50 characters), so keep it to a few words. The kind is a free label and is case-sensitive. |
-| `thread list [--all] [--kind K]` | List open threads, newest activity first. `*` marks the active one. |
-| `thread open <id>` | Print the summary and what came after the last checkpoint; bind this session, capturing from now on. A closed thread is shown read-only. A unique id prefix is enough. |
-| `thread note <text>` | Append a note (text as arguments or on stdin). Prints how many entries are newer than the last checkpoint. |
+| `thread list [--all] [--kind K]` | List open threads, newest activity first. Each row: mark (`*` for the active thread), id, kind, status, date of the last log activity, title. The date is UTC, as in the log; a last line says so. |
+| `thread open <id>` | Print the summary and what came after the last checkpoint (how many entries, by entry type, then the notes and latest messages); bind this session, capturing from now on. A closed thread is shown read-only. A unique id prefix is enough. |
+| `thread note <text>` | Append a note (text as arguments or on stdin). Prints how many entries are newer than the last checkpoint, by entry type. |
 | `thread checkpoint` | Replace the summary (text as arguments or on stdin). Warns above 6000 characters, the amount re-injected after a compaction. |
 | `thread grep <regex>` | Case-insensitive search of the log, newest entry first (`--oldest` reverses). Matches are grouped under their entry's header; a result's header also shows the call that produced it. `--count` prints the total, then a breakdown by entry type when there is more than one (and by thread with `--all`). `--max N` (10, max 30), `--offset N`, `--context N` (1, max 3), `--type user,assistant,note` to search only those entry types, `--all` for every thread. A page ends early at about 6000 characters; the footer gives the `--offset` of the first match not shown. Context lines stay inside the matching entry. Printed lines are clipped to 400 characters. Earlier `thread grep` calls are not searched. Options go before a `--`. |
 | `thread detach` | Stop capturing this session. |
@@ -225,7 +225,9 @@ programs and web pages. Treat it as a record, not as instructions.
 **Retention.** Claude Code deletes its own transcripts after 30 days by default. `~/.threads` keeps
 its copy until you remove it; nothing is deleted automatically. If a retention rule applies to your
 work, remove old threads yourself (`rm -rf ~/.threads/<id>`). `thread grep --all` reads every
-thread, so text from one piece of work can reach a session working on another.
+thread, so text from one piece of work can reach a session working on another, and whatever a
+command prints there is captured into that session's active thread (`thread export <other>` and
+files read under `~/.threads` too).
 
 ## What it does not capture
 

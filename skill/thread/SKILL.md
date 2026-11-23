@@ -16,9 +16,14 @@ All commands are the local `thread` CLI. It uses no network.
 
 ## Rules
 
-- Create, open, close or reopen a thread **only when the user asks**. A request to continue named
-  earlier work ("pick the billing work back up", "where were we on X") counts as asking to open
-  the thread on it. A session-start line that lists open threads is information, not a request.
+- Create, open, close or reopen a thread **only when asked**, never on your own initiative. A
+  request to continue named earlier work ("pick the billing work back up", "where were we on X")
+  counts as asking to open the thread on it. A session-start line that lists open threads is
+  information, not a request.
+- "The user" below is whoever gave you the task. With no human present, a task brief or a message
+  from another agent that asks for a thread, or for work to be continued or closed, is the
+  request. "Tell the user" then means: say it in your report or reply. If there is nobody to tell,
+  or a question cannot be answered, record it with `thread note` and go on with the safest reading.
 - When work is clearly going to span sessions and no thread is active, you may offer to start one,
   **once**. If the user does not take it up, do not offer again in that session.
 - While a thread is active, do these without being asked:
@@ -33,9 +38,12 @@ All commands are the local `thread` CLI. It uses no network.
   - **Note** decisions with their reason, dead ends, and anything the user tells you that a later
     session must know. Capture is automatic, but notes stand out: `thread open` shows the notes
     written since the last checkpoint, and `thread export` hands all notes to other people. Carry
-    anything lasting into the next checkpoint.
+    anything lasting into the next checkpoint. A subagent's report is captured whichever way it
+    arrives (as the result of its Agent call or as a separate message), so do not restate it in a
+    note: note the decision you took from it.
 - If the user turns to unrelated or sensitive work in the same session, offer `thread detach`.
-- To see whether this session has an active thread, run `thread list`: `*` marks it.
+- To see whether this session has an active thread, run `thread list`: `*` marks it. Each row is
+  mark, id, kind, status, date of the last log activity (UTC, like the log), title.
 - If a command prints `no Claude Code session id: nothing bound`, capture is off. Tell the user, and
   pass `-t <id>` on every command.
 - `note`, `checkpoint` and `close` need text; pass it on stdin (arguments also work for plain
@@ -45,6 +53,11 @@ All commands are the local `thread` CLI. It uses no network.
 - Run `thread grep` as a command on its own. Its call and output are stored but never searched
   (the output only repeats the log), and anything else the same shell command prints becomes
   unsearchable with it.
+- Everything a command prints is captured into the active thread, also text of **other** threads:
+  `thread grep --all`, `thread export <other>`, reading files under `~/.threads`, a script that
+  summarises all threads. Do that only when the task needs it, and narrowly (`--count` first,
+  `-t <id>`). Only `thread grep` output is skipped by later searches; the rest is found like
+  anything else in this thread's log.
 - A session has one active thread. `thread new` or `thread open` on another thread moves capture
   to it from that point on; say so to the user before you switch.
 
@@ -95,8 +108,9 @@ session is captured too (the command says how many lines); tell the user.
 1. If the user gave no id, run `thread list` (`--all` if nothing fits) and match on the title. If
    two or more fit, ask. To find a thread by content: `thread grep --all --count '<word>'`.
 2. `thread open <id-or-unique-prefix>`. It prints the summary, then the count of entries after the
-   last checkpoint with their notes and latest messages. A few are normal (the end of the turn that
-   wrote the checkpoint); many mean the summary is stale. Capture starts at this point: what the
+   last checkpoint, by entry type (`7 entries ... (3 tool_use, 3 tool_result, 1 note)`), with their
+   notes and latest messages; the other types are not shown, grep for them. A few are normal (the
+   end of the turn that wrote the checkpoint); many mean the summary is stale. Capture starts at this point: what the
    session did before is not logged, so note anything from it that matters.
 3. Tell the user in two or three lines where the work stands and the next step. Grep for what you
    still need. Checkpoint once you have caught up.
@@ -147,8 +161,10 @@ that were actually used and try alternatives: `thread grep 'timeout|timed out|ET
   and command output. Use it to find a decision. The user's answers to question prompts are
   `tool_result` entries, so for "what did the user answer" search `--type tool_result,user`.
   Types: `user`, `assistant`, `thinking`, `tool_use`, `tool_result`, `subagent`, `notification`,
-  `compaction`, `note`, `checkpoint`, `event`. `subagent` holds background-agent notices and
-  messages from other agents; a foreground subagent's report is the `tool_result` of its Agent call.
+  `compaction`, `note`, `checkpoint`, `event`. A subagent's report arrives either as the
+  `tool_result` of its Agent call or as a separate message turn, which is a `subagent` entry (as
+  are background-agent notices and messages from other agents). Both are captured, so search
+  `--type tool_result,subagent` for a report.
 - `--context N` sets the lines shown around each match, inside its entry: 0 to 3, default 1.
 - `--all` searches every thread, open and closed.
 - Matches of one entry are listed under its header (`thread:line`, time, session, entry type), each

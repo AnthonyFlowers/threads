@@ -501,6 +501,20 @@ def since_checkpoint(tid):
     return since
 
 
+def by_type(since):
+    """What a list of entries is made of, most frequent entry type first: `3 tool_use, 1 note`."""
+    n = {}
+    for e in since:
+        n[e[3]] = n.get(e[3], 0) + 1
+    return ", ".join(f"{v} {k}" for k, v in sorted(n.items(), key=lambda kv: -kv[1]))
+
+
+def activity(tid):
+    """Time of the last write to the thread's log; 0 when it has none."""
+    log = home() / tid / "log.txt"
+    return log.stat().st_mtime if log.exists() else 0
+
+
 def show(tid):
     m = meta(tid)
     print(printable(f"# {m['title']}  [{tid}]  kind={m['kind'] or '-'}  status={m['status']}") + "\n")
@@ -513,7 +527,8 @@ def show(tid):
     text = printable("\n".join(f"[{e[1]} {e[3]}] {e[5][:600]}" for e in sorted(notes + msgs)))
     if len(text) > CAP:
         text = "…" + text[-CAP:]
-    print(f"\n-- {len(since)} entries since the last checkpoint; notes and latest messages: --")
+    print(f"\n-- {len(since)} entries since the last checkpoint ({by_type(since)}); "
+          f"notes and latest messages: --")
     print(text)
     print("-- `thread grep <regex>` for more; `thread checkpoint` once caught up --")
 
@@ -565,7 +580,8 @@ def cmd_note(a):
     tid, text, sid = target(a), read_text(a.text), session_id()
     try_capture(sid)  # keep the log chronological
     append(tid, entry(now(), sid, "note", text))
-    print(f"noted in {tid} ({len(since_checkpoint(tid))} entries since the last checkpoint)")
+    since = since_checkpoint(tid)
+    print(f"noted in {tid} ({len(since)} entries since the last checkpoint: {by_type(since)})")
 
 
 def cmd_checkpoint(a, close=False):
@@ -727,13 +743,14 @@ def cmd_list(a):
         try:
             m = meta(tid)
             if (m["status"] == "open" or a.all) and (not a.kind or m["kind"] == a.kind):
-                log = home() / tid / "log.txt"
-                t = log.stat().st_mtime if log.exists() else 0
+                t = activity(tid)  # shown in UTC, as the log and meta.json are
                 rows.append((t, printable(f"{'*' if tid == cur else ' '} {tid}  {m['kind'] or '-'}  {m['status']}"
-                                          f"  {time.strftime('%Y-%m-%d', time.localtime(t))}  {m['title']}")))
+                                          f"  {time.strftime('%Y-%m-%d', time.gmtime(t))}  {m['title']}")))
         except (OSError, ValueError, KeyError, TypeError):
             continue  # unreadable meta.json: leave it out rather than fail the listing
     print("\n".join(r for _, r in sorted(rows, reverse=True)) or "(no threads)")
+    if rows:
+        print("(dates: last log activity, UTC)")
     if (home() / "errors.log").exists():
         print(f"(hook errors are recorded in {home() / 'errors.log'})")
 
@@ -767,35 +784,39 @@ def cmd_hook(a):
         if not start or d.get("agent_id"):
             return  # only a session start of the main agent prints anything
         if tid and d.get("source") == "compact":
-            text, stale = printable(summary(tid).strip()), len(since_checkpoint(tid))
+            text, since = printable(summary(tid).strip()), since_checkpoint(tid)
             print(f"Active thread: {tid} ({meta(tid)['title']}). Details lost to compaction are in "
                   f"its log: run `thread grep <regex>` before re-deriving anything.\n\n"
                   # Claude Code keeps only a preview of hook output above 10,000 characters
                   f"Thread summary:\n{text[:CAP] or '(no checkpoint yet)'}"
                   + (f"\n…[cut at {CAP} characters; `thread open {tid}` prints all of it]"
                      if len(text) > CAP else "")
-                  + (f"\n\n{stale} entries were logged after this summary, so it may be out of date: "
-                     f"write a fresh `thread checkpoint` now." if stale or not text else ""))
+                  + (f"\n\n{len(since)} entries{' (' + by_type(since) + ')' if since else ''} were logged "
+                     f"after this summary, so it may be out of date: "
+                     f"write a fresh `thread checkpoint` now." if since or not text else ""))
         elif tid:
             print(printable(f"Active thread: {tid} ({meta(tid)['title']}). This session is captured into it."))
         else:
             norm = lambda path: os.path.normcase(os.path.realpath(path)).rstrip(os.sep)
+            is_root = lambda path: os.path.dirname(path + os.sep) == path + os.sep  # "" is "/"
             here, near = norm(d.get("cwd") or os.getcwd()), []
             for t in all_ids():
                 try:
                     m = meta(t)
-                    c = norm(m["cwd"]) if m.get("cwd") else ""
-                    # the same folder or one above it; a thread started in a root folder would match
-                    # everything, so it is left out
-                    if m["status"] == "open" and os.path.dirname(c) != c and c and \
-                            (here == c or here.startswith(c + os.sep)):
-                        near.append(t)
+                    c = norm(m["cwd"]) if m.get("cwd") else None
+                    # the same folder, or one of the two inside the other (a thread is often started
+                    # after the shell moved into a subfolder). A root folder on either side would
+                    # match everything, so it matches nothing.
+                    if m["status"] == "open" and c is not None and not is_root(c) and not is_root(here) and \
+                            (here == c or here.startswith(c + os.sep) or c.startswith(here + os.sep)):
+                        near.append((activity(t), t))
                 except (OSError, ValueError, KeyError, TypeError):
                     pass
             if near:
+                near = [t for _, t in sorted(near, reverse=True)]  # most recent log activity first
                 more = f" (and {len(near) - 8} more: `thread list`)" if len(near) > 8 else ""
-                print(f"Open threads started in this folder: {', '.join(near[:8])}{more}. None is active, so "
-                      f"this session is not captured. Open one only if the user asks to continue that "
+                print(f"Open threads for this folder: {', '.join(near[:8])}{more}. None is active, so "
+                      f"this session is not captured. Open one only if you are asked to continue that "
                       f"work (`thread open <id>`).")
     except Exception:
         try:

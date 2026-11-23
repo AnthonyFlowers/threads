@@ -111,6 +111,19 @@
     that would look like a header once printed is indented. Ids no longer end in `-`. The hook
     accepts a byte-order mark. The own-grep rule knows `timeout`, `{`, `!` and `/usr/bin/env`.
   - Tests 30 -> 32.
+- 2026-11-23: Field-test fix stop 1 (`docs/FIELD-TEST.md`, findings 1 to 6; one subagent).
+  - 1, defect: the session-start line missed a thread created after the shell had moved into a
+    subfolder. It now lists a thread when the two folders are the same or one is inside the other,
+    ordered by last log activity, and reads "Open threads for this folder: ...". A root folder on
+    either side matches nothing; the root test now also holds for a Windows drive root.
+  - 2, misleading output: "N entries since the last checkpoint" is followed by the entry types,
+    most frequent first, in `thread open`, `thread note` and the compaction text.
+  - 3 to 5, skill wording: a task brief or a message from another agent counts as the request, and
+    "tell the user" means the report or, with nobody to tell, a note; a subagent's report is
+    captured as `tool_result` or as `subagent`; everything a command prints is captured, text of
+    other threads included (also in `docs/LIMITS.md` and the README).
+  - 6, cosmetic: `thread list` shows UTC dates and ends with "(dates: last log activity, UTC)".
+  - Tests stay at 32; four were extended. `hooks.json` unchanged; **replace the installed skill copy**.
 
 ## Research notes
 

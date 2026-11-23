@@ -25,8 +25,12 @@ The short version is in the [README](../README.md#what-it-does-not-capture).
   5 seconds is taken to be left by a process that died and is removed, so a command waits at most
   that long.
 - A background subagent's finishing notice and a message from another agent are logged with the
-  entry type `subagent`; the report a foreground subagent returns is the `tool_result` of its Agent
-  call; a background shell's notice is `notification`; Claude Code's own summary at a compaction is
+  entry type `subagent`. A subagent's report is captured in whichever form Claude Code delivers it:
+  as the `tool_result` of its Agent call, or as a separate message turn (entry type `subagent`;
+  recognised by how the message starts: `<agent-message`, `<cross-session-message` or `Another
+  Claude session sent a message`). A report in a form that starts differently is logged as a
+  `user` entry, or left out if Claude Code marks it as injected. A background shell's notice is
+  `notification`; Claude Code's own summary at a compaction is
   `compaction`. Slash commands you type and their local output are `user` entries.
 - A message that arrives while a turn is running (your own words, a notice, a report) can appear in
   the transcript twice, once queued and once as a user line. Both are logged: the tool never drops
@@ -56,6 +60,17 @@ The short version is in the [README](../README.md#what-it-does-not-capture).
   file being written) is not affected. The rule recognises the usual ways of running a command
   (after `;`, `&&`, `|`, in a loop, behind `env`, `rtk`, `time`, `xargs`, a Python launcher); an
   unusual wrapper is not recognised, and that call's output is then searched like any other.
+- Everything a command prints in a bound session is captured into its active thread, including
+  text of other threads: the output of `thread grep --all` or `thread export <other>`, files read
+  under `~/.threads`, a script that summarises all threads. `thread grep` skips its own earlier
+  output at search time; the output of every other command is searched like anything else, so
+  another thread's text can come back as a match in this one.
+- The session-start line lists an open thread when the session's folder and the folder the thread
+  was created in are the same or one is inside the other, at most 8, most recent log activity
+  first. A session started in a root folder, and a thread created in one, get no line. A session
+  started in a high folder (the home folder) is told about every thread below it.
+- `thread list` shows the day of the last log activity in UTC, as the log and `meta.json` do; it
+  can differ from the local date.
 - Inside an entry, unusual line separators (form feed, U+2028, CR) are stored as newlines, and a
   body line that starts with `=== ` gains a leading space.
 - A resumed session keeps its id and its binding. A forked session (`--fork-session`, `/branch`)

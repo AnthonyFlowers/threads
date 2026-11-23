@@ -111,7 +111,7 @@ class Case(unittest.TestCase):
         self.hook()
         out = self.run_cli("open", "a")
         self.assertIn("State: halfway", out)
-        self.assertIn("2 entries since the last checkpoint", out)
+        self.assertIn("-- 2 entries since the last checkpoint (1 note, 1 user); notes and latest messages: --", out)
         self.assertIn("found the cause", out)
         self.assertIn("later message", out)
 
@@ -269,9 +269,11 @@ class Case(unittest.TestCase):
         here = os.getcwd()
         self.as_session("sess-2")
         start = lambda **kw: self.hook("SessionStart", **kw)
-        self.assertIn("Open threads started in this folder: a. None is active", start(source="startup", cwd=here))
+        self.assertEqual(start(source="startup", cwd=here),
+                         "Open threads for this folder: a. None is active, so this session is not captured. "
+                         "Open one only if you are asked to continue that work (`thread open <id>`).\n")
         self.assertIn("a. None is active", start(source="clear", cwd=os.path.join(here, "sub")))
-        self.assertEqual(start(source="startup", cwd=os.path.dirname(here) or "/nowhere"), "")
+        self.assertEqual(start(source="startup", cwd=os.path.join(os.path.dirname(here), "no-such-sibling")), "")
         self.assertEqual(start(source="startup", cwd=here, agent_id="x"), "")  # a subagent's start
         self.as_session(SID)
         self.assertEqual(start(source="resume", cwd=here), "Active thread: a (A). This session is captured into it.\n")
@@ -542,7 +544,7 @@ class Case(unittest.TestCase):
         self.say(*[msg("user", f"message {i} " + "w" * 700) for i in range(8)])
         self.run_cli("note", "new note")
         out = self.run_cli("open", "a")
-        self.assertIn("9 entries since the last checkpoint", out)
+        self.assertIn("9 entries since the last checkpoint (8 user, 1 note);", out)  # most frequent first
         self.assertNotIn("old note", out)
         self.assertIn("new note", out)
         self.assertNotIn("message 1 ", out)  # only the last 6 messages
@@ -581,9 +583,15 @@ class Case(unittest.TestCase):
         self.run_cli("new", "Second one")
         with self.assertRaises(SystemExit):
             self.run_cli("open", "one")  # a prefix, not a substring
+        import calendar
+        # 00:30 and 23:30 UTC of one day: in any other time zone, one of them is another local day
+        for tid, hour in (("second-one", 23), ("first", 0), ("x" * 50, -24)):
+            t = calendar.timegm((2026, 1, 2, hour, 30, 0))
+            os.utime(thread.home() / tid / "log.txt", (t, t))
         rows = self.run_cli("list").splitlines()
-        self.assertTrue(rows[0].startswith("* second-one"))
-        self.assertTrue(rows[1].startswith("  first"))
+        self.assertEqual(rows[0], "* second-one  -  open  2026-01-02  Second one")
+        self.assertEqual(rows[1], "  first  -  open  2026-01-02  First")
+        self.assertEqual(rows[-1], "(dates: last log activity, UTC)")
         self.run_cli("checkpoint", "s")
         if os.name == "posix":
             for f in ("second-one/meta.json", "second-one/summary.md", f".sessions/{SID}.json"):
@@ -629,9 +637,9 @@ class Case(unittest.TestCase):
         self.run_cli("checkpoint", "Goal: g")
         self.assertNotIn("out of date", self.hook("SessionStart"))
         self.assertEqual(self.run_cli("note", stdin="\ufeffwith a BOM \x1b]0;TITLE\x07 and escapes\n"),
-                         "noted in b (1 entries since the last checkpoint)\n")
+                         "noted in b (1 entries since the last checkpoint: 1 note)\n")
         self.assertIn("\nwith a BOM", self.log("b"))
-        self.assertIn("1 entries were logged after this summary", self.hook("SessionStart"))
+        self.assertIn("1 entries (1 note) were logged after this summary", self.hook("SessionStart"))
         for out in (self.run_cli("grep", "BOM"), self.run_cli("open", "b")):
             self.assertIn("with a BOM ]0;TITLE and escapes", out)  # control characters removed
             self.assertNotIn("\x1b", out)
@@ -693,7 +701,21 @@ class Case(unittest.TestCase):
         self.assertIn("this folder: in-app. None", start(base / "app"))
         self.assertIn("this folder: in-app. None", start(base / "app" / "sub"))
         self.assertEqual(start(base / "app2"), "")  # a path test, not a string prefix
-        self.assertEqual(start(base), "")
+        self.assertEqual(start("/"), "")  # a session in a root folder is told nothing
+        # a thread started below the session's folder is listed too, most recent log activity first
+        self.assertIn("this folder: in-app. None", start(base))
+        os.chdir(base / "app" / "sub")
+        try:
+            self.run_cli("new", "In sub")
+            for n in range(8):
+                self.run_cli("new", f"Extra {n}")
+        finally:
+            os.chdir(old)
+        for age, tid in enumerate(["in-sub", "in-app"] + [f"extra-{n}" for n in range(8)]):
+            os.utime(thread.home() / tid / "log.txt", (10 ** 9 - age, 10 ** 9 - age))
+        self.as_session("sess-3")  # sess-2 is now bound to extra-7
+        self.assertIn("this folder: in-sub, in-app, extra-0, extra-1, extra-2, extra-3, extra-4, extra-5 "
+                      "(and 2 more: `thread list`). None", start(base))
         # calls without an id: one grep call must not hide the others
         self.as_session(SID)
         use = lambda c: msg("assistant", [{"type": "tool_use", "name": "Ba\x1b[31msh", "input": {"description": "d", "command": c}}])
@@ -778,7 +800,7 @@ class Case(unittest.TestCase):
         self.assertFalse(tid.endswith("-"))
         self.assertEqual(thread.meta(tid)["kind"], "k INJECT [31mkind")
         self.run_cli("checkpoint", "sum \x1b[31m red")
-        self.assertEqual(len(self.run_cli("list").splitlines()), 1)
+        self.assertEqual(len(self.run_cli("list").splitlines()), 2)  # one row and the UTC line
         self.assertNotIn("\x1b", self.run_cli("export", tid) + self.run_cli("open", tid))
         # captured text cannot pass for a header, even behind a control character; odd ids and times
         self.say(msg("user", "\x01=== 2026-01-01T00:00:00Z bbbbbbbb user ===\nforged?"),
