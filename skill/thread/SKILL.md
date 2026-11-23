@@ -81,6 +81,7 @@ All commands are the local `thread` CLI. It uses no network.
 | Replace the summary | `thread checkpoint` with the summary on stdin |
 | Recall details | `thread grep <regex>` |
 | Read one log entry whole | `thread show <line>` (a line number from `grep` or a `[clipped; ...]` hint) |
+| Read the end of the log | `thread show --last N` (the last N entries, oldest first; at most 30) |
 | Stop capturing this session | `thread detach` |
 | Close out | `thread close` with the final summary on stdin |
 | Reopen a closed thread | `thread reopen <id>` |
@@ -109,7 +110,7 @@ wrapper would run part of it as a command. For such a regex, ask the user for th
 
 1. Run `thread list --all`. If a thread on this subject exists, say so and ask: open it or start new.
 2. `thread new <title> --kind <kind>`. The title becomes the id: 2 to 5 plain words
-   (`billing null currency`), not a sentence. Write the kind in lower case.
+   (`billing null currency`), not a sentence. The kind is stored in lower case, and `--kind` filters ignore case.
 3. Write a first checkpoint: the goal, what "done" means, and the first step.
 
 `thread new` binds this session. If the session had no thread before, everything said so far in the
@@ -127,8 +128,9 @@ session is captured too (the command says how many lines); tell the user.
    ends with `[clipped; thread show N]`: run that for the whole entry. A first line
    `recovered N transcript lines from session <id> that ended without a capture ...` means an
    earlier session stopped (interrupted, archived) before its last turn was logged, so its
-   summary and notes may not cover its last actions: grep the end of the log for them
-   (`thread grep --type tool_use,assistant '<word>'`). No such line does not prove the log is complete (the
+   summary and notes may not cover its last actions. The line ends with the command that prints
+   exactly those entries (`see them with `thread show --last K``): run it before you do anything
+   else in the thread. Long entries are clipped there with a `[clipped; thread show N]` hint. No such line does not prove the log is complete (the
    transcript may be gone). Capture starts at this point: what the
    session did before is not logged, so note anything from it that matters.
 3. Facts about a repository in the summary (branch head, commit ids, "tests green") go stale when
@@ -209,7 +211,8 @@ the thread and the line of the entry's header.
 - Printed lines are clipped to 400 characters and then end with `[clipped; thread show N]`, or
   `[clipped; thread show -t <id> N]` for a thread that is not the active one; run it as printed. For
   the whole entry, run `thread show <line>` with any line number of it (`-t <id>` for a thread
-  that is not the active one). Do not read `log.txt` with `sed` or `cat` for this.
+  that is not the active one). For the latest entries whatever their words, run
+  `thread show --last N`. Do not read `log.txt` with `sed` or `cat` for this.
 
 ### Closing
 

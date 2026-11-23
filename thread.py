@@ -136,6 +136,13 @@ def append(tid, text):
     # one append-mode write per call, so entries from concurrent sessions do not interleave mid-entry
     text = mask(text)
     path = str(home() / tid / "log.txt")
+    try:  # a log edited by hand may not end with a newline: the entry header must start its own line
+        with open(path, "rb") as f:
+            f.seek(-1, 2)
+            if f.read(1) != b"\n":
+                text = "\n" + text
+    except OSError:
+        pass  # no log yet, or an empty one
     if os.name == "nt":
         # the C runtime's O_APPEND seeks and then writes, and text mode splits the write at each
         # newline: parallel writers lose data. FILE_APPEND_DATA appends atomically in the kernel.
@@ -275,6 +282,21 @@ def find_transcript(sid):
     base = os.environ.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude")
     hits = glob.glob(os.path.join(glob.escape(base), "projects", "*", f"{sid}.jsonl"))
     return hits[0] if hits else None
+
+
+def own_transcript(path, sid):
+    """False for a transcript file that is named after another session and holds no line of sid."""
+    if Path(path).name == f"{sid}.jsonl" or not os.path.isfile(path):
+        return True  # not a file: handled as before (nothing captured, or an error in errors.log)
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            if sid in line:
+                try:
+                    if json.loads(line).get("sessionId") == sid:
+                        return True
+                except (ValueError, AttributeError):
+                    pass
+    return False
 
 
 def flat(content):
@@ -441,6 +463,8 @@ def _capture(sid, tpath):
     tid = st["thread"] = bound(st)  # None also when it was closed or removed by another session
     if isinstance(was, str) and not tid:
         st["lost"] = was  # kept until the session's next command has said so (see target)
+    if tpath and not own_transcript(tpath, sid):
+        tpath = None  # another session's file: its length must not become this session's offset
     tpath = tpath or find_transcript(sid)
     if tpath and os.path.exists(tpath):
         with open(tpath, encoding="utf-8", errors="replace") as f:
@@ -620,10 +644,15 @@ def cmd_new(a):
         die("empty title")
     base = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:50].strip("-") or "thread"
     tid, n = base, 1
-    while (home() / tid).exists():
-        n += 1
-        tid = f"{base}-{n}"
-    save_meta({"id": tid, "title": title, "kind": printable(" ".join((a.kind or "").split())), "status": "open",
+    home().mkdir(parents=True, exist_ok=True, mode=0o700)
+    while True:
+        try:
+            os.mkdir(home() / tid, 0o700)  # exclusive: two `thread new` with one title get two ids
+            break
+        except FileExistsError:
+            n += 1
+            tid = f"{base}-{n}"
+    save_meta({"id": tid, "title": title, "kind": printable(" ".join((a.kind or "").lower().split())), "status": "open",
                "created": now(), "cwd": os.path.realpath(os.getcwd()), "uid": os.urandom(4).hex()})
     sid = session_id()
     was = active(sid)
@@ -634,13 +663,17 @@ def cmd_new(a):
           + (f"; {n} earlier transcript lines of this session were captured into it" if n else ""))
 
 
-def recover(tid, sid):
+def recover(tid, sid, cur=None, after=0):
     """Capture the uncaptured tail of other sessions bound to tid whose transcript is still on
-    disk: a session that was interrupted and then archived got no hook for its last turn."""
+    disk: a session that was interrupted and then archived got no hook for its last turn.
+    `cur` is the caller's active thread once the command is done; `after` is the number of
+    entries the command itself still appends."""
+    log, k = home() / tid / "log.txt", after
     for p in sorted((home() / ".sessions").glob("*.json")):
         other = p.stem
         if other == sid or bound(state(other)) != tid or not find_transcript(other):
             continue
+        size = log.stat().st_size if log.exists() else 0
         try:
             n = capture(other)  # under that session's lock and id; its offset advances
         except Exception as e:
@@ -648,16 +681,21 @@ def recover(tid, sid):
                   file=sys.stderr)
             continue
         if n:
+            with open(log, "rb") as f:  # count the entries just added, for the command that shows them
+                f.seek(size)
+                k += sum(1 for l in f.read().decode("utf-8", "replace").splitlines() if HDR.match(l))
             print(f"recovered {n} transcript lines from session {other[:8]} that ended without a capture "
-                  f"(or is still running); they are at the end of the log, after later entries\n")
+                  f"(or is still running); they are at the end of the log, after later entries: "
+                  f"see them with `{show_cmd(tid, f'--last {min(k, LAST_MAX)}', cur)}`\n")
 
 
 def cmd_open(a):
     tid = resolve(a.id)
     sid = session_id()
-    recover(tid, sid)
     # after this command the thread is the caller's active one only if it is open and can be bound
-    show(tid, tid if is_open(tid) and state_path(sid) else None)
+    cur = tid if is_open(tid) and state_path(sid) else None
+    recover(tid, sid, cur)
+    show(tid, cur)
     if meta(tid)["status"] == "closed":
         print(f"\n(closed: shown read-only, not bound; `thread reopen {tid}` to work on it again)")
     else:
@@ -692,7 +730,7 @@ def cmd_checkpoint(a, close=False):
         die(f"thread {tid} is closed; only notes can be added. `thread reopen {tid}` first")
     try_capture(sid)
     if close:
-        recover(tid, sid)  # before the close: afterwards those sessions are of an earlier generation
+        recover(tid, sid, after=2)  # before the close: afterwards those sessions are of an earlier generation
     if len(text) > CAP:
         print(f"thread: summary is {len(text)} characters; only the first {CAP} are re-injected "
               f"after a compaction", file=sys.stderr)
@@ -732,7 +770,41 @@ def clip(line, start=0, n=None):
     return ("…" if s else "") + line[s:s + 400] + "…" + (f" [clipped; {n}]" if n else "")
 
 
+LAST_MAX = 30  # entries `thread show --last` prints at most
+
+
+def show_last(tid, lines, n):
+    """The last n entries of the log, oldest first, whole unless together they pass CAP."""
+    if not re.fullmatch(r"\d+", n) or int(n) < 1:  # a string, as `line` is: the message says what to give
+        die("--last takes a number of entries, 1 or more: `thread show --last 5`")
+    n = int(n)
+    heads = [i for i, l in enumerate(lines) if HDR.match(l)][-min(n, LAST_MAX):]
+    if not heads:
+        die(f"the log of {tid} has no entries")
+    cur = active(session_id())
+    blocks = [printable(f"{tid}:{s + 1}  " + "\n".join(lines[s:e])) for s, e in zip(heads, heads[1:] + [len(lines)])]
+    budget, cut = CAP, 0
+    # shortest first, so what a short entry leaves of its share goes to the longer ones
+    for k, i in enumerate(sorted(range(len(blocks)), key=lambda i: len(blocks[i]))):
+        share = budget // (len(blocks) - k)
+        budget -= min(len(blocks[i]), share)
+        if len(blocks[i]) > share:
+            blocks[i], cut = f"{blocks[i][:share]}… [clipped; {show_cmd(tid, heads[i] + 1, cur)}]", cut + 1
+    print("\n".join(blocks))
+    if cut:
+        print(f"[{cut} of {len(blocks)} entries clipped to keep the page near {CAP} characters; "
+              f"`thread show <line>` prints one whole]")
+    if n > LAST_MAX:
+        print(f"[--last prints at most {LAST_MAX} entries]")
+
+
 def cmd_show(a):
+    if (a.line is None) == (a.last is None):
+        die("show takes a log line number (see `thread grep`) or `--last N`, one of the two")
+    if a.last is not None:
+        tid = target(a)
+        p = home() / tid / "log.txt"
+        return show_last(tid, p.read_text(encoding="utf-8", errors="replace").splitlines() if p.exists() else [], a.last)
     if not re.fullmatch(r"[+-]?\d+", a.line):
         die("show takes a log line number (see `thread grep`); to read a thread use "
             "`thread open <id>` or `thread export <id>`")
@@ -870,7 +942,7 @@ def cmd_list(a):
     for tid in all_ids():
         try:
             m = meta(tid)
-            if (m["status"] == "open" or a.all) and (not a.kind or m["kind"] == a.kind):
+            if (m["status"] == "open" or a.all) and (not a.kind or str(m["kind"]).lower() == a.kind.lower()):
                 t = activity(tid)  # shown in UTC, as the log and meta.json are
                 rows.append((t, printable(f"{'*' if tid == cur else ' '} {tid}  {m['kind'] or '-'}  {m['status']}"
                                           f"  {time.strftime('%Y-%m-%d', time.gmtime(t))}  {m['title']}")))
@@ -890,7 +962,8 @@ def cmd_export(a):
                     f"created: {m.get('created')}\n\n## Summary\n\n{summary(tid).strip() or '(none)'}\n\n## Notes\n"))
     for e in entries(tid):
         if e[3] == "note":
-            print(printable(f"- {e[1]}: {e[5]}"))
+            # later lines are indented: they stay in the list item and cannot be headings of the export
+            print(printable(f"- {e[1]}: " + re.sub(r"\n(?=[^\n])", "\n  ", e[5])))
 
 
 def cmd_hook(a):
@@ -991,8 +1064,10 @@ def main(argv=None):
     s.add_argument("--context", type=int, default=1, help="context lines (default 1, max 3)")
     s.add_argument("--type", help="search only these entry types, e.g. user,assistant,note")
     s.add_argument("--oldest", action="store_true", help="list the oldest matches first")
-    s = cmd("show", cmd_show, "print the whole log entry that contains a log line number", thread=True)
-    s.add_argument("line", help="a line number, as `thread grep` and `thread open` print them")
+    s = cmd("show", cmd_show, "print the whole log entry that contains a log line number, or the last entries",
+            thread=True)
+    s.add_argument("line", nargs="?", help="a line number, as `thread grep` and `thread open` print them")
+    s.add_argument("--last", metavar="N", help="print the last N entries of the log (max 30), oldest first")
     s = cmd("list", cmd_list, "list open threads")
     s.add_argument("--all", action="store_true", help="include closed threads")
     s.add_argument("--kind")

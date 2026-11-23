@@ -850,7 +850,7 @@ class Case(unittest.TestCase):
         out = self.run_cli("new", "t " * 30, "--kind", "k\nINJECT \x1b[31m\x9b\u202ekind")
         tid = thread.active(SID)
         self.assertFalse(tid.endswith("-"))
-        self.assertEqual(thread.meta(tid)["kind"], "k INJECT [31mkind")
+        self.assertEqual(thread.meta(tid)["kind"], "k inject [31mkind")  # stored in lower case
         self.run_cli("checkpoint", "sum \x1b[31m red")
         self.assertEqual(len(self.run_cli("list").splitlines()), 2)  # one row and the UTC line
         self.assertNotIn("\x1b", self.run_cli("export", tid) + self.run_cli("open", tid))
@@ -1088,6 +1088,87 @@ class Case(unittest.TestCase):
             out = thread.mask(big)
             self.assertLess(time.time() - t, 2)
             self.assertEqual(out.count("\n"), big.count("\n"))
+
+    def test_append_starts_on_a_new_line_after_a_hand_edit(self):
+        self.run_cli("new", "A")
+        log = thread.home() / "a" / "log.txt"
+        log.write_text(log.read_text().rstrip("\n") + " edited")  # the editor left no final newline
+        self.run_cli("note", "after the edit")
+        self.run_cli("note", "and again")
+        self.assertRegex(self.log("a"), r"created: A edited\n=== \S+ sess-1 note ===\nafter the edit\n=== ")
+        self.assertEqual([e[3] for e in thread.entries("a")], ["event", "note", "note"])
+
+    def test_show_last_prints_the_last_entries_and_recover_names_it(self):
+        self.run_cli("new", "A")
+        for n in range(3):
+            self.run_cli("note", f"note {n}\nsecond line")
+        out = self.run_cli("show", "--last", "2")
+        self.assertRegex(out, r"^a:6  === \S+ sess-1 note ===\nnote 1\nsecond line\n"
+                              r"a:9  === \S+ sess-1 note ===\nnote 2\nsecond line\n$")
+        self.assertEqual(self.run_cli("show", "-t", "a", "--last", "99").count("=== "), 4)  # all there is, said once
+        self.assertIn("[--last prints at most 30 entries]", self.run_cli("show", "--last", "99"))
+        self.run_cli("note", stdin="big " + "y" * 9000)
+        out = self.run_cli("show", "--last", "3")
+        self.assertLess(len(out), thread.CAP + 300)
+        self.assertIn("note 2\nsecond line\n", out)  # the short entries stay whole
+        self.assertRegex(out, r"y… \[clipped; thread show 12\]\n\[1 of 3 entries clipped to keep the page near 6000 "
+                              r"characters; `thread show <line>` prints one whole\]\n$")
+        for bad in (("show",), ("show", "3", "--last", "2"), ("show", "--last", "0")):
+            err = io.StringIO()
+            with self.assertRaises(SystemExit) as e, contextlib.redirect_stderr(err):
+                self.run_cli(*bad)
+            self.assertEqual(e.exception.code, 1)
+            self.assertIn("--last", err.getvalue())
+        # a recovered tail: the line names the command that shows exactly those entries
+        self.say(msg("assistant", [{"type": "text", "text": "tail text"},
+                                   {"type": "tool_use", "name": "Bash", "id": "c1", "input": {"command": "ls"}}]),
+                 msg("user", "tail ask"))
+        self.as_session("sess-2")
+        out = self.run_cli("open", "a")
+        self.assertIn("after later entries: see them with `thread show --last 3`\n", out)
+        self.assertEqual([l.split()[4] for l in self.run_cli("show", "--last", "3").split("\n") if l.startswith("a:")],
+                         ["assistant", "tool_use", "user"])
+        self.as_session(SID)
+        self.say(msg("user", "one more"))
+        self.as_session("sess-2")
+        out = self.run_cli("close", "Outcome: done")  # closed: -t, and the checkpoint and the close event follow
+        self.assertIn("see them with `thread show -t a --last 3`\n", out)
+        self.assertIn("one more", self.run_cli("show", "-t", "a", "--last", "3"))
+
+    def test_export_keeps_a_note_inside_its_list_item(self):
+        self.run_cli("new", "A")
+        self.run_cli("note", stdin="decision\n\n## Notes\n# not a title\nend")
+        out = self.run_cli("export", "a")
+        self.assertRegex(out, r"\n## Notes\n\n- \S+: decision\n\n  ## Notes\n  # not a title\n  end\n$")
+
+    def test_hook_ignores_the_transcript_of_another_session(self):
+        self.run_cli("new", "A")
+        self.say(msg("user", "mine one"))
+        self.hook()
+        other = self.transcript.with_name("sess-9.jsonl")
+        other.write_text("".join(msg("user", f"theirs {n}").replace(SID, "sess-9") for n in range(6)))
+        self.say(msg("user", "mine two"))
+        self.run_cli("hook", stdin=json.dumps({"session_id": SID, "transcript_path": str(other)}))
+        self.say(msg("user", "mine three"))
+        self.hook()
+        log = self.log("a")
+        self.assertNotIn("theirs", log)
+        for text in ("mine one", "mine two", "mine three"):
+            self.assertEqual(log.count(text), 1, text)
+
+    def test_kind_is_lower_case_on_write_and_filter(self):
+        self.run_cli("new", "Mixed case", "--kind", "Bug")
+        self.assertEqual(thread.meta("mixed-case")["kind"], "bug")
+        m = thread.meta("mixed-case")
+        m["kind"] = "Bug"  # written by an earlier version
+        thread.save_meta(m)
+        for kind in ("bug", "BUG"):
+            self.assertIn("mixed-case", self.run_cli("list", "--kind", kind))
+        self.assertNotIn("mixed-case", self.run_cli("list", "--kind", "idea"))
+
+    def test_new_takes_the_next_id_when_the_folder_exists(self):
+        (thread.home() / "a").mkdir(parents=True)  # another `thread new a` got here first, meta.json not yet written
+        self.assertIn("created thread a-2", self.run_cli("new", "A"))
 
 if __name__ == "__main__":
     unittest.main()

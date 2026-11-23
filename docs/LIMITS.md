@@ -21,7 +21,9 @@ The short version is in the [README](../README.md#what-it-does-not-capture).
   then archived), the next `thread open` or `thread close` of that thread from any session captures
   the rest of its transcript, under the earlier session's id, and prints `recovered N transcript lines from session
   <id> that ended without a capture (or is still running); ...`. The recovered entries are at the end
-  of the log, after entries that are newer by their time stamp. Nothing is recovered when the
+  of the log, after entries that are newer by their time stamp; the line ends with the command that
+  prints them (`thread show --last K`). When a hook of the calling session captures before that
+  command runs, the last K entries include that session's newer ones. Nothing is recovered when the
   transcript file is gone (deleted, or made on another machine), when that session is bound to
   another thread or detached by then, or for what that session did after the thread was closed
   (`thread reopen` recovers nothing); that work is then not in the log, and nothing says so. A session still running on the same thread is captured early
@@ -118,6 +120,8 @@ The short version is in the [README](../README.md#what-it-does-not-capture).
   the fork itself did. Without the hooks installed, `thread new` in a fork captures the copied
   history too.
 - Lines in a transcript that carry another session's id are not captured.
+  A hook's `transcript_path` is used only when the file is named `<session id>.jsonl` or holds a line
+  of that session; otherwise the session's own file is looked up as when no path is given.
 - When one session closes or removes a thread, another session bound to it is detached at its next
   capture. Its next `thread` command that uses the active thread fails once with `thread <id> was
   closed or removed by another session, ...`, also when a hook ran in between; after that the
