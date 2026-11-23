@@ -213,7 +213,7 @@ still adds to one.
   errors.log         hook failures (a hook never blocks a session)
 ```
 
-`THREADS_HOME` overrides the directory. To remove a thread: `rm -rf ~/.threads/<id>`. A session
+`THREADS_HOME` overrides the directory (an existing folder keeps its own permissions). To remove a thread: `rm -rf ~/.threads/<id>`. A session
 bound to a removed or closed thread is treated as detached.
 
 The log contains whatever your tools printed, including any secrets, and text from other

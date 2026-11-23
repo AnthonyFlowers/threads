@@ -78,8 +78,8 @@
 - 2026-11-22: Fourth review (two fresh subagents, commits 5b53833..f22fb19). Fixed:
   - Messages delivered while a turn runs (queued attachments) were dropped unless they were agent
     reports: the user's own mid-turn messages (35 of 41 in the owner's transcripts existed nowhere
-    else) and 725 of 822 subagent and shell notices. All queued messages are now captured, with a
-    text match so that a queued copy and its user line give one entry.
+    else) and 725 of 822 subagent and shell notices. All queued messages are now captured. (The text
+    match added with it, to merge a queued copy with its user line, was removed in the next entry.)
   - Folder reminder used a string prefix (`/work/app2` matched `/work/app`); now a path test on
     real paths, and a thread started in a root folder is left out.
   - Own-grep rule: quoted mentions no longer count; `rtk`, `env`, loops, `xargs` and `command` as a
@@ -91,6 +91,14 @@
     had it deleted. The tests now also point `HOME` and `USERPROFILE` at their temp folder, so the
     code under test cannot reach the real home even when that lookup is broken.
   - Tests 28 -> 29.
+- 2026-11-22: Blind review (two fresh subagents given only the repository path). Both found that the
+  text de-duplication added in 603ff83 dropped real messages: a queued "ok" made every later "ok"
+  vanish, and on the owner's recent transcripts it removed 119 entries, 1 of them a true duplicate.
+  Owner decision: no de-duplication by text at all; a message that arrives queued and as a user
+  line is logged twice. Also fixed: `open` with no transcript in reach could later capture the
+  earlier session; escape sequences in titles and exported notes; a corrupt `meta.json` gave a
+  traceback; an existing `THREADS_HOME` folder was set to mode 0700; an empty hook stdin wrote an
+  error. Tests 29 -> 30.
 
 ## Research notes
 

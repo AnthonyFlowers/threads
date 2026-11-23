@@ -6,7 +6,6 @@ all under ~/.threads/<id>/. Standard library only, no network. See README.md.
 """
 import argparse
 import glob
-import hashlib
 import json
 import os
 import re
@@ -35,8 +34,8 @@ def now():
 
 
 def write(path, text):
-    home().mkdir(parents=True, exist_ok=True, mode=0o700)  # mkdir's mode covers only the leaf
-    os.chmod(home(), 0o700)  # also when the directory was there already
+    if not home().exists():  # an existing folder (a shared THREADS_HOME) keeps its own mode
+        home().mkdir(parents=True, exist_ok=True, mode=0o700)  # mkdir's mode covers only the leaf
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")  # unique, so parallel writers cannot collide
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -268,7 +267,6 @@ def render(line, own=None, since=None, seen=None):
         seen.add(d["uuid"])
     if own and d.get("sessionId") and d["sessionId"] != own:
         return ""
-    queued = False
     if d.get("type") == "attachment":
         # whatever arrives while a turn is running is delivered as a queued attachment: the
         # user's own words, a subagent's notice or report
@@ -276,7 +274,7 @@ def render(line, own=None, since=None, seen=None):
         prompt = att.get("prompt") if isinstance(att, dict) and att.get("type") == "queued_command" else None
         if not isinstance(prompt, str):
             return ""
-        d, queued = {**d, "type": "user", "message": {"content": prompt}}, True
+        d = {**d, "type": "user", "message": {"content": prompt}}
     if d.get("type") not in ("user", "assistant"):
         return ""
     ts, sid, role = "".join(str(d.get("timestamp") or now()).split()), d.get("sessionId"), d["type"]
@@ -294,12 +292,6 @@ def render(line, own=None, since=None, seen=None):
             text = b.get("text", "")
             text = text if isinstance(text, str) else json.dumps(text, ensure_ascii=False)
             start, kind = text.lstrip(), role
-            if role == "user" and seen is not None:
-                # the same message can come once queued and once as a user line: keep one
-                key = hashlib.sha1(" ".join(text.split())[:120].encode("utf-8", "replace")).hexdigest()[:16]
-                if "q:" + key in seen or (queued and "u:" + key in seen):
-                    continue
-                seen.add(("q:" if queued else "u:") + key)
             if role == "user":  # not everything on a user line was said by the user
                 if d.get("isCompactSummary"):
                     kind = "compaction"  # Claude Code's own summary at a compaction
@@ -341,7 +333,7 @@ def capture(sid, tpath=None):
         first = st.get("offset", 0)
         if not isinstance(first, int) or not 0 <= first <= len(lines):
             first = 0  # the transcript was replaced by a shorter one, or the state is damaged
-        parts, seen = [], set(st.get("recent") or [])
+        parts, seen = [], set()
         for n, line in enumerate(lines[first:] if tid else [], first + 1):
             try:
                 parts.append(render(line, sid, st.get("since"), seen))
@@ -354,8 +346,6 @@ def capture(sid, tpath=None):
         # shortcut: no lock, two captures of one session at the same instant can duplicate
         # entries; add a lock file if that ever shows up in a log.
         st["offset"] = len(lines)  # with no thread (detached) the lines are skipped for good
-        # remember recent message texts, so a queued copy and its user line match across captures
-        st["recent"] = sorted(k for k in seen if k[:2] in ("q:", "u:"))[-200:]
         write(state_path(sid), json.dumps(st))
         return len(parts)
     write(state_path(sid), json.dumps(st))
@@ -384,6 +374,8 @@ def bind(sid, tid, backfill=False):
         write(state_path(sid), json.dumps(st))
         capture(sid)  # to the previous thread; with none, this skips what came before
         st = state(sid)
+        if fresh and not find_transcript(sid):
+            st["since"] = now()  # no transcript in reach to skip: a later hook must not go back before now
     st["thread"], st["gen"] = tid, generation(tid)
     write(state_path(sid), json.dumps(st))
     n = capture(sid)
@@ -471,7 +463,7 @@ def show(tid):
 
 
 def cmd_new(a):
-    title = " ".join(" ".join(a.title).split())  # one line, single spaces
+    title = printable(" ".join(" ".join(a.title).split()))  # one line, single spaces
     if not title:
         die("empty title")
     base = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:50] or "thread"
@@ -697,13 +689,16 @@ def cmd_export(a):
           f"created: {m['created']}\n\n## Summary\n\n{summary(tid).strip() or '(none)'}\n\n## Notes\n")
     for e in entries(tid):
         if e[3] == "note":
-            print(f"- {e[1]}: {e[5]}")
+            print(printable(f"- {e[1]}: {e[5]}"))
 
 
 def cmd_hook(a):
     """Claude Code hook entry point. Never fails the session: errors go to errors.log."""
     try:
-        d = json.load(sys.stdin)
+        raw = sys.stdin.read()
+        if not raw.strip():
+            return  # run by hand with nothing on stdin
+        d = json.loads(raw)
         sid = d.get("session_id") or ""
         if not state_path(sid):
             return
@@ -801,7 +796,10 @@ def main(argv=None):
         if hasattr(s, "reconfigure"):  # Windows pipes default to the locale code page
             s.reconfigure(encoding="utf-8", errors="replace")
     a = p.parse_args(argv)
-    a.fn(a)
+    try:
+        a.fn(a)
+    except json.JSONDecodeError as e:  # the hook has its own handler and never gets here
+        die(f"a state or meta.json file under {home()} is not valid JSON ({e}); repair or remove it")
 
 
 if __name__ == "__main__":

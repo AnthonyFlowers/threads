@@ -444,11 +444,12 @@ class Case(unittest.TestCase):
         self.hook()
         log = self.log("a")
         self.assertEqual(self.kinds("a"), ["event", "user", "thinking", "tool_use", "tool_result", "subagent", "notification", "subagent",
-                          "subagent", "user", "user"])
-        self.assertEqual((log.count("report A"), log.count("report B"), log.count("shell exited")), (1, 1, 1))
+                          "subagent", "notification", "user", "user"])
+        # nothing is de-duplicated by text: a notice that arrives queued and as a user line is kept twice
+        self.assertEqual((log.count("report A"), log.count("report B"), log.count("shell exited")), (1, 1, 2))
         self.assertIn(" user ===\ntyped while the turn ran\n", log)  # the user's mid-turn message
         self.assertNotIn("not a queued message", log)
-        # a queued copy and its user line can fall into different capture runs
+        # the same text again, queued or not, in this capture run or a later one, is never dropped
         self.say(json.dumps({"type": "attachment", "sessionId": SID, "attachment":
                              {"type": "queued_command", "prompt": "<agent-message>report C</agent-message>"}}) + "\n")
         self.hook()
@@ -457,8 +458,15 @@ class Case(unittest.TestCase):
                  msg("user", "<agent-message>report C</agent-message>"), msg("user", "go on"), msg("user", "go on"))
         self.hook()
         log = self.log("a")
-        self.assertEqual(log.count("<agent-message>report C</agent-message>"), 2)  # queued + the prefixed form
-        self.assertEqual(log.count("\ngo on\n"), 2)  # the user may say the same thing twice
+        self.assertEqual(log.count("<agent-message>report C</agent-message>"), 3)
+        self.assertEqual(log.count("\ngo on\n"), 2)
+        queued = json.dumps({"type": "attachment", "sessionId": SID, "attachment":
+                             {"type": "queued_command", "prompt": "yes", "origin": {"kind": "human"}}}) + "\n"
+        self.say(queued, msg("user", "yes"))
+        self.hook()
+        self.say(msg("user", "yes"), msg("user", "yes"))
+        self.hook()
+        self.assertEqual(self.log("a").count(" user ===\nyes\n"), 4)
         self.assertIn("\n === 2026-01-01T00:00:00Z abcdefgh note ===\n", log)  # escaped, not an entry
         self.assertIn(" tool_use Ba_sh_x u1 ===\na: 1\n=== 2026-01-01T00:00:00.000Z sess-1 tool_result u1 ===", log)
         self.assertIn("ok\n[image]\n", log)
@@ -578,9 +586,9 @@ class Case(unittest.TestCase):
         if os.name == "posix":
             for f in ("second-one/meta.json", "second-one/summary.md", f".sessions/{SID}.json"):
                 self.assertEqual((thread.home() / f).stat().st_mode & 0o777, 0o600, f)
-            os.chmod(thread.home(), 0o755)
+            os.chmod(thread.home(), 0o755)  # an existing folder keeps the mode its owner gave it
             self.run_cli("note", "x")
-            self.assertEqual(thread.home().stat().st_mode & 0o777, 0o700)
+            self.assertEqual(thread.home().stat().st_mode & 0o777, 0o755)
             os.chmod(self.transcript, 0)  # capture fails; the note must still be written
             self.run_cli("note", "kept despite capture failure")
             os.chmod(self.transcript, 0o600)
@@ -710,6 +718,30 @@ class Case(unittest.TestCase):
         fork.write_text(msg("user", "parent, same second").replace(SID, "sess-3").replace("2026-01-01T00:00:00", since[:19]))
         self.run_cli("new", "F")
         self.assertNotIn("parent, same second", self.log("f"))
+
+    def test_open_without_a_transcript_in_reach_escapes_and_corrupt_meta(self):
+        self.run_cli("new", "Plain \x1b[31mtitle")
+        self.assertEqual(thread.meta("plain-31mtitle")["title"], "Plain [31mtitle")
+        self.run_cli("note", "esc \x1b]0;x\x07 note")
+        self.assertNotIn("\x1b", self.run_cli("export", "plain") + self.run_cli("list") + self.run_cli("open", "plain"))
+        # a session whose transcript the CLI cannot find: `open` must still not capture what came before
+        self.as_session("sess-9")
+        hidden = Path(self.tmp.name) / "elsewhere" / "t.jsonl"
+        hidden.parent.mkdir()
+        hidden.write_text(msg("user", "said before the open").replace(SID, "sess-9"))
+        self.run_cli("open", "plain")
+        with open(hidden, "a") as f:
+            f.write(msg("user", "said after the open").replace(SID, "sess-9").replace("2026-01-01", "2099-01-01"))
+        self.run_cli("hook", stdin=json.dumps({"session_id": "sess-9", "transcript_path": str(hidden)}))
+        log = self.log("plain-31mtitle")
+        self.assertNotIn("said before the open", log)
+        self.assertIn("said after the open", log)
+        self.run_cli("hook", stdin="")  # run by hand with nothing on stdin: no error recorded
+        self.assertFalse((thread.home() / "errors.log").exists())
+        (thread.home() / "plain-31mtitle" / "meta.json").write_text("{")
+        with self.assertRaises(SystemExit) as e:
+            self.run_cli("open", "plain")
+        self.assertEqual(e.exception.code, 1)  # a message, not a traceback
 
     def test_printed_details(self):
         self.run_cli("new", "A")

@@ -25,8 +25,8 @@ The short version is in the [README](../README.md#what-it-does-not-capture).
   call; a background shell's notice is `notification`; Claude Code's own summary at a compaction is
   `compaction`. Slash commands you type and their local output are `user` entries.
 - A message that arrives while a turn is running (your own words, a notice, a report) can appear in
-  the transcript twice, once queued and once as a user line. One copy is kept, matched on its first
-  120 characters among the last 200 messages of the session.
+  the transcript twice, once queued and once as a user line. Both are logged: the tool never drops
+  an entry because its text was seen before.
 - When Claude Code writes the same transcript line twice, one copy is kept, but only within one
   capture run.
 - Thinking is stored only when the transcript holds its text. Current Claude Code leaves most
