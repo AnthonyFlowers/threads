@@ -1125,15 +1125,112 @@ class Case(unittest.TestCase):
                  msg("user", "tail ask"))
         self.as_session("sess-2")
         out = self.run_cli("open", "a")
-        self.assertIn("after later entries: see them with `thread show --last 3`\n", out)
-        self.assertEqual([l.split()[4] for l in self.run_cli("show", "--last", "3").split("\n") if l.startswith("a:")],
-                         ["assistant", "tool_use", "user"])
+        self.assertIn("they are log lines 14-19, after later entries: see them with `thread show --from 14 3`\n", out)
+        self.assertEqual(self.shown(self.run_cli("show", "--from", "14", "3")), ["assistant", "tool_use", "user"])
         self.as_session(SID)
         self.say(msg("user", "one more"))
         self.as_session("sess-2")
-        out = self.run_cli("close", "Outcome: done")  # closed: -t, and the checkpoint and the close event follow
-        self.assertIn("see them with `thread show -t a --last 3`\n", out)
-        self.assertIn("one more", self.run_cli("show", "-t", "a", "--last", "3"))
+        out = self.run_cli("close", "Outcome: done")  # closed: -t; the checkpoint and the close event follow
+        self.assertIn("they are log lines 20-21, after later entries: see them with `thread show -t a --from 20 1`\n", out)
+        self.assertRegex(self.run_cli("show", "-t", "a", "--from", "20", "1"), r"^a:20  === \S+ sess-1 user ===\none more\n$")
+
+    def shown(self, out):
+        return [l.split()[4] for l in out.split("\n") if re.match(r"\S+:\d+  === ", l)]
+
+    def test_recover_hint_is_exact_when_more_is_appended_after_the_tail(self):
+        self.run_cli("new", "A")
+        self.as_session("sess-2")
+        self.transcript.with_name("sess-2.jsonl").write_text("")
+        self.run_cli("open", "a")
+        self.as_session("sess-3")
+        self.transcript.with_name("sess-3.jsonl").write_text("")
+        self.run_cli("open", "a")  # three sessions bound to a
+        self.say(msg("user", "AAA ask"), msg("assistant", "AAA reply"))  # sess-1's tail, no hook
+        with open(self.transcript.with_name("sess-2.jsonl"), "a") as f:  # sess-2's tail, no hook
+            f.write(msg("user", "BBB ask").replace(SID, "sess-2"))
+        with open(self.transcript.with_name("sess-3.jsonl"), "a") as f:  # the caller's own uncaptured turn
+            f.write(msg("user", "CCC own").replace(SID, "sess-3"))
+        out = self.run_cli("open", "a")  # (b) two tails in one open; (a) the caller's lines come after them
+        hints = re.findall(r"they are log lines (\d+)-(\d+), after later entries: see them with `thread (show --from \d+ \d+)`", out)
+        self.assertEqual([h[2] for h in hints], ["show --from 3 2", "show --from 7 1"], out)
+        one, two = (self.run_cli(*h[2].split()) for h in hints)
+        self.assertEqual((one.count("AAA"), one.count("BBB"), one.count("CCC")), (2, 0, 0), one)
+        self.assertEqual((two.count("AAA"), two.count("BBB"), two.count("CCC")), (0, 1, 0), two)
+        self.assertIn("CCC own", self.log("a"))  # appended after both tails, by the bind
+
+    def test_show_from_prints_entries_from_a_line_on(self):
+        self.run_cli("new", "A")
+        for n in range(35):
+            self.run_cli("note", f"note {n:02d}")
+        out = self.run_cli("show", "--from", "4", "2")  # line 4 is inside the entry at line 3
+        self.assertRegex(out, r"^a:3  === \S+ sess-1 note ===\nnote 00\na:5  === \S+ sess-1 note ===\nnote 01\n$")
+        self.assertEqual(len(self.shown(self.run_cli("show", "--from", "3"))), 30)  # default and most: 30
+        out = self.run_cli("show", "--from", "3", "33")
+        self.assertTrue(out.endswith("note 29\n[--from prints at most 30 entries; the next ones: `thread show --from 63 3`]\n"), out[-200:])
+        self.assertEqual(self.run_cli("show", "--from", "63", "3").count("\nnote "), 3)
+        self.assertNotIn("at most", self.run_cli("show", "--from", "69", "99"))  # nothing left out
+        for bad in (("--from", "0"), ("--from", "x"), ("--from", "999"), ("--from", "3", "0"), ("--from", "3", "--last", "2")):
+            err = io.StringIO()
+            with self.assertRaises(SystemExit) as e, contextlib.redirect_stderr(err):
+                self.run_cli("show", *bad)
+            self.assertEqual(e.exception.code, 1, bad)
+
+    def test_summary_file_removed_or_not_utf8(self):
+        self.run_cli("new", "A")
+        self.run_cli("checkpoint", "## Goal\nGOAL ONE")
+        self.run_cli("checkpoint", "## Goal\nGOAL TWO")
+        path = thread.home() / "a" / "summary.md"
+        path.unlink()
+        for out in (self.run_cli("open", "a"), self.hook("SessionStart"), self.run_cli("export", "a")):
+            self.assertIn(thread.NO_SUMMARY + "\n## Goal\nGOAL TWO", out)  # the last checkpoint entry of the log
+            self.assertNotIn("GOAL ONE", out)
+            self.assertNotIn("no checkpoint yet", out)
+        self.run_cli("checkpoint", "## Goal\nGOAL THREE")  # writes the file again
+        self.assertNotIn("missing", self.run_cli("open", "a"))
+        path.write_bytes("## Goal\nGOAL caf\xe9\n".encode("latin-1"))
+        for out in (self.run_cli("open", "a"), self.hook("SessionStart"), self.run_cli("export", "a")):
+            self.assertIn("GOAL caf\ufffd", out)
+        self.assertIn("Active thread: a (A)", self.hook("SessionStart"))
+        self.assertFalse((thread.home() / "errors.log").exists())
+        path.unlink()
+        (thread.home() / "a" / "log.txt").unlink()
+        self.assertIn("(no checkpoint yet)", self.run_cli("open", "a"))  # no file and no entry
+
+    def test_meta_is_written_to_the_folder_it_was_read_from(self):
+        self.run_cli("new", "A")
+        os.rename(thread.home() / "a", thread.home() / "renamed")  # by hand; meta.json still says "id": "a"
+        self.as_session("sess-2")
+        self.assertEqual(self.run_cli("close", "-t", "renamed", "Outcome: done"), "closed thread renamed\n")
+        self.assertEqual(thread.all_ids(), ["renamed"])  # no ghost folder `a`
+        m = thread.meta("renamed")
+        self.assertEqual((m["id"], m["status"]), ("renamed", "closed"))
+        self.run_cli("reopen", "renamed")
+        self.assertEqual((thread.all_ids(), thread.meta("renamed")["status"]), (["renamed"], "open"))
+
+    def test_damaged_meta_fields_never_print_a_traceback(self):
+        self.run_cli("new", "A")
+        path = thread.home() / "a" / "meta.json"
+        good = json.loads(path.read_text())
+        for bad in ("two", None, 1.5, [], {}, True):
+            path.write_text(json.dumps({**good, "closes": bad}))
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertEqual(self.run_cli("close", "-t", "a", "Outcome: done"), "closed thread a\n")
+            self.assertEqual(err.getvalue(), 'thread: "closes" in the meta.json of a was not a number; counted from 0\n')
+            self.assertEqual((thread.meta("a")["closes"], thread.meta("a")["status"]), (1, "closed"))
+            self.assertEqual(self.run_cli("reopen", "a"), "reopened thread a\n")
+        for key in ("id", "title", "kind", "status", "created", "cwd", "uid", "closes"):
+            for bad in ("x", 5, None, 1.5, [1], {"k": 1}, True):
+                path.write_text(json.dumps({**good, key: bad}))
+                for argv in (("list", "--all"), ("open", "a"), ("export", "a"), ("note", "-t", "a", "n"), ("show", "-t", "a", "1"),
+                             ("grep", "-t", "a", "n"), ("checkpoint", "-t", "a", "s"), ("close", "-t", "a", "s"),
+                             ("reopen", "a"), ("detach",), ("hook",)):
+                    with contextlib.redirect_stderr(io.StringIO()):
+                        try:
+                            self.hook("SessionStart") if argv == ("hook",) else self.run_cli(*argv)
+                        except SystemExit as e:  # a one-line message; anything else fails the test
+                            self.assertEqual(e.code, 1, (key, bad, argv))
+        self.assertFalse((thread.home() / "errors.log").exists())
 
     def test_export_keeps_a_note_inside_its_list_item(self):
         self.run_cli("new", "A")
@@ -1161,7 +1258,7 @@ class Case(unittest.TestCase):
         self.assertEqual(thread.meta("mixed-case")["kind"], "bug")
         m = thread.meta("mixed-case")
         m["kind"] = "Bug"  # written by an earlier version
-        thread.save_meta(m)
+        thread.save_meta("mixed-case", m)
         for kind in ("bug", "BUG"):
             self.assertIn("mixed-case", self.run_cli("list", "--kind", kind))
         self.assertNotIn("mixed-case", self.run_cli("list", "--kind", "idea"))

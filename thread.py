@@ -54,10 +54,10 @@ def write(path, text):
             time.sleep(0.025)
 
 
-def read(path):
+def read(path, errors="strict"):
     for attempt in range(40):
         try:
-            return path.read_text(encoding="utf-8")
+            return path.read_text(encoding="utf-8", errors=errors)
         except PermissionError:  # Windows: the file is being replaced at this moment
             if attempt == 39:
                 raise
@@ -180,8 +180,9 @@ def meta(tid):
     return m
 
 
-def save_meta(m):
-    write(home() / m["id"] / "meta.json", json.dumps(m, indent=1))
+def save_meta(tid, m):
+    m["id"] = tid  # the folder name is the id: a folder renamed by hand is written where it was read
+    write(home() / tid / "meta.json", json.dumps(m, indent=1))
 
 
 def all_ids():
@@ -207,6 +208,9 @@ def resolve(ref):
     return hits[0]
 
 
+NO_SUMMARY = "(summary.md is missing: this is the last checkpoint entry of the log; `thread checkpoint` writes the file again)"
+
+
 def is_open(tid):
     try:
         return meta(tid)["status"] == "open"
@@ -222,8 +226,15 @@ def generation(tid):
 
 
 def summary(tid):
+    """The text of summary.md; when the file is gone, the last checkpoint entry of the log."""
     p = home() / tid / "summary.md"
-    return read(p) if p.exists() else ""
+    if p.exists():
+        return read(p, errors="replace")  # a stray byte must not silence a hook
+    last = None
+    for e in entries(tid):
+        if e[3] == "checkpoint":
+            last = e[5]
+    return "" if last is None else f"{NO_SUMMARY}\n{last}"
 
 
 def entries(tid):
@@ -652,7 +663,7 @@ def cmd_new(a):
         except FileExistsError:
             n += 1
             tid = f"{base}-{n}"
-    save_meta({"id": tid, "title": title, "kind": printable(" ".join((a.kind or "").lower().split())), "status": "open",
+    save_meta(tid, {"id": tid, "title": title, "kind": printable(" ".join((a.kind or "").lower().split())), "status": "open",
                "created": now(), "cwd": os.path.realpath(os.getcwd()), "uid": os.urandom(4).hex()})
     sid = session_id()
     was = active(sid)
@@ -663,12 +674,12 @@ def cmd_new(a):
           + (f"; {n} earlier transcript lines of this session were captured into it" if n else ""))
 
 
-def recover(tid, sid, cur=None, after=0):
+def recover(tid, sid, cur=None):
     """Capture the uncaptured tail of other sessions bound to tid whose transcript is still on
     disk: a session that was interrupted and then archived got no hook for its last turn.
-    `cur` is the caller's active thread once the command is done; `after` is the number of
-    entries the command itself still appends."""
-    log, k = home() / tid / "log.txt", after
+    `cur` is the caller's active thread once the command is done. The line it prints names log
+    line numbers, which stay true whatever is appended after them."""
+    log = home() / tid / "log.txt"
     for p in sorted((home() / ".sessions").glob("*.json")):
         other = p.stem
         if other == sid or bound(state(other)) != tid or not find_transcript(other):
@@ -681,12 +692,13 @@ def recover(tid, sid, cur=None, after=0):
                   file=sys.stderr)
             continue
         if n:
-            with open(log, "rb") as f:  # count the entries just added, for the command that shows them
-                f.seek(size)
-                k += sum(1 for l in f.read().decode("utf-8", "replace").splitlines() if HDR.match(l))
+            data = log.read_bytes()  # where the entries just added are, for the command that shows them
+            first = len(data[:size].decode("utf-8", "replace").splitlines()) + 1  # numbered as show and grep do
+            lines = data.decode("utf-8", "replace").splitlines()
+            k = sum(1 for l in lines[first - 1:] if HDR.match(l))
             print(f"recovered {n} transcript lines from session {other[:8]} that ended without a capture "
-                  f"(or is still running); they are at the end of the log, after later entries: "
-                  f"see them with `{show_cmd(tid, f'--last {min(k, LAST_MAX)}', cur)}`\n")
+                  f"(or is still running); they are log lines {first}-{len(lines)}, after later entries: "
+                  f"see them with `{show_cmd(tid, f'--from {first} {k}', cur)}`\n")
 
 
 def cmd_open(a):
@@ -710,7 +722,7 @@ def cmd_reopen(a):
     capture(sid)  # while it is still closed, so what a bound session did meanwhile stays out
     m = meta(tid)
     m["status"] = "open"
-    save_meta(m)
+    save_meta(tid, m)
     bind(sid, tid)
     append(tid, entry(now(), sid, "event", "reopened"))
     print(f"reopened thread {tid}")
@@ -730,7 +742,7 @@ def cmd_checkpoint(a, close=False):
         die(f"thread {tid} is closed; only notes can be added. `thread reopen {tid}` first")
     try_capture(sid)
     if close:
-        recover(tid, sid, after=2)  # before the close: afterwards those sessions are of an earlier generation
+        recover(tid, sid)  # before the close: afterwards those sessions are of an earlier generation
     if len(text) > CAP:
         print(f"thread: summary is {len(text)} characters; only the first {CAP} are re-injected "
               f"after a compaction", file=sys.stderr)
@@ -739,8 +751,12 @@ def cmd_checkpoint(a, close=False):
     if close:
         mine = active(sid) == tid
         m = meta(tid)
-        m["status"], m["closes"] = "closed", m.get("closes", 0) + 1
-        save_meta(m)
+        n = m.get("closes", 0)
+        if type(n) is not int:
+            print(f'thread: "closes" in the meta.json of {tid} was not a number; counted from 0', file=sys.stderr)
+            n = 0
+        m["status"], m["closes"] = "closed", n + 1
+        save_meta(tid, m)
         append(tid, entry(now(), sid, "event", "closed"))
         if mine:
             detach(sid)  # other sessions bound to it are detached at their next capture
@@ -773,16 +789,27 @@ def clip(line, start=0, n=None):
 LAST_MAX = 30  # entries `thread show --last` prints at most
 
 
-def show_last(tid, lines, n):
-    """The last n entries of the log, oldest first, whole unless together they pass CAP."""
+def show_last(tid, lines, n, start=None):
+    """The last n entries of the log, or n entries from the one that holds line `start`; oldest
+    first, whole unless together they pass CAP."""
     if not re.fullmatch(r"\d+", n) or int(n) < 1:  # a string, as `line` is: the message says what to give
-        die("--last takes a number of entries, 1 or more: `thread show --last 5`")
+        die("--last takes a number of entries, 1 or more: `thread show --last 5`" if start is None else
+            "--from takes a log line number, then a number of entries, 1 or more: `thread show --from 120 5`")
     n = int(n)
-    heads = [i for i, l in enumerate(lines) if HDR.match(l)][-min(n, LAST_MAX):]
-    if not heads:
+    every = [i for i, l in enumerate(lines) if HDR.match(l)]
+    if not every:
         die(f"the log of {tid} has no entries")
+    lo = max(0, len(every) - min(n, LAST_MAX))
+    if start is not None:
+        if not re.fullmatch(r"\d+", start) or not 1 <= int(start) <= len(lines):
+            die(f"no line {start} in the log of {tid}: it has {len(lines)} lines")
+        lo = sum(1 for h in every if h < int(start)) - 1
+        if lo < 0:
+            die(f"line {start} of the log of {tid} is not inside an entry")
+    heads = every[lo:lo + min(n, LAST_MAX)]
+    ends = (every + [len(lines)])[lo + 1:lo + 1 + len(heads)]
     cur = active(session_id())
-    blocks = [printable(f"{tid}:{s + 1}  " + "\n".join(lines[s:e])) for s, e in zip(heads, heads[1:] + [len(lines)])]
+    blocks = [printable(f"{tid}:{s + 1}  " + "\n".join(lines[s:e])) for s, e in zip(heads, ends)]
     budget, cut = CAP, 0
     # shortest first, so what a short entry leaves of its share goes to the longer ones
     for k, i in enumerate(sorted(range(len(blocks)), key=lambda i: len(blocks[i]))):
@@ -794,17 +821,22 @@ def show_last(tid, lines, n):
     if cut:
         print(f"[{cut} of {len(blocks)} entries clipped to keep the page near {CAP} characters; "
               f"`thread show <line>` prints one whole]")
-    if n > LAST_MAX:
+    if n > LAST_MAX and start is None:
         print(f"[--last prints at most {LAST_MAX} entries]")
+    elif n > LAST_MAX and lo + LAST_MAX < len(every):
+        more = f"--from {every[lo + LAST_MAX] + 1} {n - LAST_MAX}"
+        print(f"[--from prints at most {LAST_MAX} entries; the next ones: `{show_cmd(tid, more, cur)}`]")
 
 
 def cmd_show(a):
-    if (a.line is None) == (a.last is None):
-        die("show takes a log line number (see `thread grep`) or `--last N`, one of the two")
-    if a.last is not None:
+    if (a.line is None) == (a.last is None) and a.start is None or a.start is not None and a.last is not None:
+        die("show takes a log line number (see `thread grep`) or `--last N`, one of the two; "
+            "`--from LINE [N]` prints N entries from a line on")
+    if a.last is not None or a.start is not None:
         tid = target(a)
         p = home() / tid / "log.txt"
-        return show_last(tid, p.read_text(encoding="utf-8", errors="replace").splitlines() if p.exists() else [], a.last)
+        lines = p.read_text(encoding="utf-8", errors="replace").splitlines() if p.exists() else []
+        return show_last(tid, lines, (a.line or str(LAST_MAX)) if a.last is None else a.last, a.start)
     if not re.fullmatch(r"[+-]?\d+", a.line):
         die("show takes a log line number (see `thread grep`); to read a thread use "
             "`thread open <id>` or `thread export <id>`")
@@ -1068,6 +1100,8 @@ def main(argv=None):
             thread=True)
     s.add_argument("line", nargs="?", help="a line number, as `thread grep` and `thread open` print them")
     s.add_argument("--last", metavar="N", help="print the last N entries of the log (max 30), oldest first")
+    s.add_argument("--from", dest="start", metavar="LINE",
+                   help="print the entries from this log line on: `--from LINE [N]`, N entries (default and max 30)")
     s = cmd("list", cmd_list, "list open threads")
     s.add_argument("--all", action="store_true", help="include closed threads")
     s.add_argument("--kind")

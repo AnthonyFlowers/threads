@@ -11,7 +11,9 @@ The short version is in the [README](../README.md#what-it-does-not-capture).
 - Capture runs when a turn ends (also when it ends in an API error), before compaction, at session
   start and end, and on `new`, `open` (of an open thread), `reopen`, `note`, `checkpoint`, `close`, `detach`
   and the first page of `grep`.
-- `thread new` in a session that had no thread captures the session from its start. `thread open`
+- `thread new` in a session that had no thread captures the session from its start. That includes
+  what the session read from other threads before (`thread show -t <id> <line>`, `thread grep -t <id> <regex>` or `--all`), so the
+  new log can hold copies of older threads' text, and `thread grep` matches those copies. `thread open`
   and `thread reopen` capture from that moment on; what the session did before is not stored.
 - When the tool cannot find the session's transcript file at the moment of `thread open` (or of a
   switch to another thread), it captures only lines stamped from that second on. A switch then
@@ -20,10 +22,10 @@ The short version is in the [README](../README.md#what-it-does-not-capture).
   next hook or `thread` command in the same session. If the session is never used again (interrupted,
   then archived), the next `thread open` or `thread close` of that thread from any session captures
   the rest of its transcript, under the earlier session's id, and prints `recovered N transcript lines from session
-  <id> that ended without a capture (or is still running); ...`. The recovered entries are at the end
-  of the log, after entries that are newer by their time stamp; the line ends with the command that
-  prints them (`thread show --last K`). When a hook of the calling session captures before that
-  command runs, the last K entries include that session's newer ones. Nothing is recovered when the
+  <id> that ended without a capture (or is still running); ...`. The recovered entries are appended
+  to the log, after entries that are newer by their time stamp; the line names their log lines and ends
+  with the command that prints them (`thread show --from A K`), which stays exact when more is
+  logged after them. Nothing is recovered when the
   transcript file is gone (deleted, or made on another machine), when that session is bound to
   another thread or detached by then, or for what that session did after the thread was closed
   (`thread reopen` recovers nothing); that work is then not in the log, and nothing says so. A session still running on the same thread is captured early
@@ -110,6 +112,11 @@ The short version is in the [README](../README.md#what-it-does-not-capture).
   was created in are the same or one is inside the other, at most 8, most recent log activity
   first. A session started in a root folder, and a thread created in one, get no line. A session
   started in a high folder (the home folder) is told about every thread below it.
+- Files edited by hand: when `summary.md` is gone, `thread open`, `thread export` and the text after a
+  compaction print the last checkpoint entry of the log instead, under a line that says so; bytes in it
+  that are not UTF-8 are shown as `�`. The folder name is the thread id: a folder renamed by hand keeps
+  working, and the next `close` or `reopen` corrects the `id` in its `meta.json`. A `closes` that is
+  not a number counts as 0, and `thread close` says so.
 - `thread list` shows the day of the last log activity in UTC, as the log and `meta.json` do; it
   can differ from the local date.
 - Inside an entry, unusual line separators (form feed, U+2028, CR) are stored as newlines, and a

@@ -82,6 +82,7 @@ All commands are the local `thread` CLI. It uses no network.
 | Recall details | `thread grep <regex>` |
 | Read one log entry whole | `thread show <line>` (a line number from `grep` or a `[clipped; ...]` hint) |
 | Read the end of the log | `thread show --last N` (the last N entries, oldest first; at most 30) |
+| Read entries from a log line on | `thread show --from <line> [N]` (N entries, default and at most 30) |
 | Stop capturing this session | `thread detach` |
 | Close out | `thread close` with the final summary on stdin |
 | Reopen a closed thread | `thread reopen <id>` |
@@ -114,7 +115,9 @@ wrapper would run part of it as a command. For such a regex, ask the user for th
 3. Write a first checkpoint: the goal, what "done" means, and the first step.
 
 `thread new` binds this session. If the session had no thread before, everything said so far in the
-session is captured too (the command says how many lines); tell the user.
+session is captured too (the command says how many lines); tell the user. That includes anything the
+session read from OTHER threads before (`thread show -t <id> <line>`, `thread grep -t <id> <regex>` or `--all`): the
+new log then holds copies of the older threads' text, and `thread grep` matches them there too.
 
 ### Resuming
 
@@ -129,7 +132,8 @@ session is captured too (the command says how many lines); tell the user.
    `recovered N transcript lines from session <id> that ended without a capture ...` means an
    earlier session stopped (interrupted, archived) before its last turn was logged, so its
    summary and notes may not cover its last actions. The line ends with the command that prints
-   exactly those entries (`see them with `thread show --last K``): run it before you do anything
+   exactly those entries (`they are log lines A-B ...: see them with `thread show --from A K``; one line
+   per recovered session): run it before you do anything
    else in the thread. Long entries are clipped there with a `[clipped; thread show N]` hint. No such line does not prove the log is complete (the
    transcript may be gone). Capture starts at this point: what the
    session did before is not logged, so note anything from it that matters.
