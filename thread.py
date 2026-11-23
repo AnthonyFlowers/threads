@@ -5,6 +5,7 @@ A thread is an append-only plain-text log, a current summary and a little metada
 all under ~/.threads/<id>/. Standard library only, no network. See README.md.
 """
 import argparse
+import contextlib
 import glob
 import json
 import os
@@ -34,8 +35,10 @@ def now():
 
 
 def write(path, text):
-    if not home().exists():  # an existing folder (a shared THREADS_HOME) keeps its own mode
-        home().mkdir(parents=True, exist_ok=True, mode=0o700)  # mkdir's mode covers only the leaf
+    made = not home().exists()
+    home().mkdir(parents=True, exist_ok=True, mode=0o700)  # mkdir's mode covers only the leaf
+    if made or not os.environ.get("THREADS_HOME"):
+        os.chmod(home(), 0o700)  # ~/.threads is always private; a THREADS_HOME that was there keeps its mode
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")  # unique, so parallel writers cannot collide
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -63,13 +66,15 @@ def read(path):
 
 def printable(s):
     """Log text goes back to a terminal and into the agent's context: drop control characters."""
-    return re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", "", s)
+    return re.sub("[\x00-\x08\x0b-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]", "", s)  # C0, C1, bidi overrides
 
 
 def entry(ts, sid, kind, body, extra=""):
-    head = f"=== {ts} {(sid or '-')[:8]} {kind}{' ' + extra if extra else ''} ==="
-    # a body line that looks like a header is indented so the log stays parseable
-    lines = [" " + l if l.startswith("=== ") else l for l in str(body).splitlines()]
+    sid = "".join(str(sid or "-").split())[:8] or "-"
+    head = f"=== {ts} {sid} {kind}{' ' + extra if extra else ''} ==="
+    # a body line that looks like a header, also once it is printed, is indented: the log stays
+    # parseable and a captured line cannot pass for an entry header
+    lines = [" " + l if printable(l).startswith("=== ") else l for l in str(body).splitlines()]
     return head + "\n" + "\n".join(lines) + "\n"
 
 
@@ -107,7 +112,10 @@ def append(tid, text):
 # ---- threads ----
 
 def meta(tid):
-    return json.loads(read(home() / tid / "meta.json"))
+    m = json.loads(read(home() / tid / "meta.json"))  # invalid JSON or encoding is a ValueError too
+    if not isinstance(m, dict) or any(k not in m for k in ("id", "title", "kind", "status")):
+        raise ValueError(f"the meta.json of thread {tid} is damaged")
+    return m
 
 
 def save_meta(m):
@@ -131,7 +139,7 @@ def resolve(ref):
 def is_open(tid):
     try:
         return meta(tid)["status"] == "open"
-    except (OSError, ValueError, KeyError, TypeError):
+    except (OSError, ValueError):
         return False  # removed or unreadable
 
 
@@ -218,11 +226,12 @@ def flat(content):
 # `thread grep` in command position: at the start of a line or after ; & | ( and, optionally,
 # VAR=value assignments, a python launcher and a path. A mere mention in an argument does not count.
 GREP_CALL = re.compile(
-    r"""(?m)(?:^|[;&|(`])\s*"""                                                 # command position
-    r"""(?:(?:rtk|time|command|exec|xargs|sudo|do|then|else)\s+|env\s+(?:-u\s+\S+\s+|-\S+\s+)*)*"""
+    r"""(?m)(?:^|[;&|({!`])\s*"""                                               # command position
+    r"""(?:(?:rtk|time|command|exec|xargs|sudo|do|then|else|timeout\s+\S+)\s+"""
+    r"""|(?:\S*/)?env\s+(?:-u\s+\S+\s+|-\S+\s+)*)*"""
     r"""(?:\w+=\S*\s+)*"""                                                      # VAR=value
     r"""(?:(?:\S*python[\d.]*(?:\.exe)?|py(?:\.exe)?)\s+(?:-\S+\s+)*|uv\s+run\s+)?"""  # launcher
-    r"""["']?(?:\S*[/\\])?thread(?:\.py|\.cmd)?["']?\s+grep\b""")
+    r"""["']?(?:\S*[/\\])?thread(?:\.py|\.cmd)?["']?\s+grep(?=\s|$)""")
 HEREDOC = re.compile(r"<<-?\s*['\"]?(\w+)['\"]?[^\n]*\n.*?\n\s*\1\b", re.S)
 QUOTED = re.compile(r"""'[^']*'|"(?:[^"\\]|\\.)*\"""")
 
@@ -277,7 +286,7 @@ def render(line, own=None, since=None, seen=None):
         d = {**d, "type": "user", "message": {"content": prompt}}
     if d.get("type") not in ("user", "assistant"):
         return ""
-    ts, sid, role = "".join(str(d.get("timestamp") or now()).split()), d.get("sessionId"), d["type"]
+    ts, sid, role = "".join(str(d.get("timestamp") or "").split()) or now(), d.get("sessionId"), d["type"]
     if since and d.get("timestamp") and ts[:19] <= since[:19]:
         return ""
     content = (d.get("message") or {}).get("content")
@@ -317,9 +326,50 @@ def render(line, own=None, since=None, seen=None):
     return "".join(out)
 
 
+LOCK_STALE = 5  # seconds; a capture takes well under one, so an older lock belongs to a dead process
+_held = set()
+
+
+@contextlib.contextmanager
+def locked(sid):
+    """One process at a time reads a session's offset, appends and saves the offset: without this,
+    parallel `thread` commands store the same transcript lines several times."""
+    p = state_path(sid)
+    if not p or sid in _held:
+        yield
+        return
+    lock = p.with_suffix(".lock")
+    home().mkdir(parents=True, exist_ok=True, mode=0o700)
+    lock.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    while True:
+        try:
+            os.close(os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+            break
+        except (FileExistsError, PermissionError):  # PermissionError: Windows, while it is being deleted
+            try:
+                if time.time() - lock.stat().st_mtime > LOCK_STALE:
+                    os.unlink(lock)  # its holder died; two waiters doing this at once is the rare leftover race
+                    continue
+            except OSError:
+                continue
+            time.sleep(0.02)
+    _held.add(sid)
+    try:
+        yield
+    finally:
+        _held.discard(sid)
+        with contextlib.suppress(OSError):
+            os.unlink(lock)
+
+
 def capture(sid, tpath=None):
     """Append the uncaptured part of the session transcript to the session's active thread.
     Returns the number of transcript lines that produced entries."""
+    with locked(sid):
+        return _capture(sid, tpath)
+
+
+def _capture(sid, tpath):
     st = state(sid)
     if not st:
         return 0
@@ -343,8 +393,6 @@ def capture(sid, tpath=None):
         parts = [x for x in parts if x]
         if parts:
             append(tid, "".join(parts))
-        # shortcut: no lock, two captures of one session at the same instant can duplicate
-        # entries; add a lock file if that ever shows up in a log.
         st["offset"] = len(lines)  # with no thread (detached) the lines are skipped for good
         write(state_path(sid), json.dumps(st))
         return len(parts)
@@ -353,10 +401,11 @@ def capture(sid, tpath=None):
 
 
 def detach(sid):
-    st = state(sid)
-    if st:
-        st["thread"] = None
-        write(state_path(sid), json.dumps(st))
+    with locked(sid):
+        st = state(sid)
+        if st:
+            st["thread"] = None
+            write(state_path(sid), json.dumps(st))
 
 
 def bind(sid, tid, backfill=False):
@@ -366,20 +415,23 @@ def bind(sid, tid, backfill=False):
     if not state_path(sid):
         print("(no Claude Code session id: nothing bound, nothing will be captured)")
         return 0
-    st = state(sid) or {"offset": 0, "fresh": True}
-    fresh = st.pop("fresh", False)  # never bound: no state yet, or a fork marked by the hook
-    if fresh and backfill:
-        st["offset"] = 0
-    else:
+    with locked(sid):  # the whole switch, so a hook cannot capture in the middle of it
+        st = state(sid) or {"offset": 0, "fresh": True}
+        fresh = st.pop("fresh", False)  # never bound: no state yet, or a fork marked by the hook
+        if fresh and backfill:
+            st["offset"] = 0
+        else:
+            write(state_path(sid), json.dumps(st))
+            capture(sid)  # to the previous thread; with none, this skips what came before
+            st = state(sid)
+            if not find_transcript(sid):
+                # no transcript in reach to skip: a later hook, which is given its path, must not
+                # go back before this second
+                st["since"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 1))
+        st["thread"], st["gen"] = tid, generation(tid)
         write(state_path(sid), json.dumps(st))
-        capture(sid)  # to the previous thread; with none, this skips what came before
-        st = state(sid)
-        if fresh and not find_transcript(sid):
-            st["since"] = now()  # no transcript in reach to skip: a later hook must not go back before now
-    st["thread"], st["gen"] = tid, generation(tid)
-    write(state_path(sid), json.dumps(st))
-    n = capture(sid)
-    return n if fresh and backfill else 0
+        n = capture(sid)
+        return n if fresh and backfill else 0
 
 
 def try_capture(sid):
@@ -395,6 +447,10 @@ def target(args):
         return resolve(args.thread)
     tid = active(session_id())
     if not tid:
+        was = (state(session_id()) or {}).get("thread")
+        if isinstance(was, str):
+            die(f"thread {was} was closed or removed by another session, so this session is no longer "
+                f"captured: `thread open {was}` (or `thread reopen {was}`) to continue, or pass -t <id>")
         die("no active thread: run `thread open <id>` or pass -t <id>")
     return tid
 
@@ -447,7 +503,7 @@ def since_checkpoint(tid):
 
 def show(tid):
     m = meta(tid)
-    print(f"# {m['title']}  [{tid}]  kind={m['kind'] or '-'}  status={m['status']}\n")
+    print(printable(f"# {m['title']}  [{tid}]  kind={m['kind'] or '-'}  status={m['status']}") + "\n")
     print(printable(summary(tid).strip()) or "(no checkpoint yet)")
     since = since_checkpoint(tid)
     if not since:
@@ -466,12 +522,12 @@ def cmd_new(a):
     title = printable(" ".join(" ".join(a.title).split()))  # one line, single spaces
     if not title:
         die("empty title")
-    base = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:50] or "thread"
+    base = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:50].strip("-") or "thread"
     tid, n = base, 1
     while (home() / tid).exists():
         n += 1
         tid = f"{base}-{n}"
-    save_meta({"id": tid, "title": title, "kind": a.kind or "", "status": "open",
+    save_meta({"id": tid, "title": title, "kind": printable(" ".join((a.kind or "").split())), "status": "open",
                "created": now(), "cwd": os.path.realpath(os.getcwd()), "uid": os.urandom(4).hex()})
     sid = session_id()
     was = active(sid)
@@ -673,8 +729,8 @@ def cmd_list(a):
             if (m["status"] == "open" or a.all) and (not a.kind or m["kind"] == a.kind):
                 log = home() / tid / "log.txt"
                 t = log.stat().st_mtime if log.exists() else 0
-                rows.append((t, f"{'*' if tid == cur else ' '} {tid}  {m['kind'] or '-'}  {m['status']}"
-                                f"  {time.strftime('%Y-%m-%d', time.localtime(t))}  {m['title']}"))
+                rows.append((t, printable(f"{'*' if tid == cur else ' '} {tid}  {m['kind'] or '-'}  {m['status']}"
+                                          f"  {time.strftime('%Y-%m-%d', time.localtime(t))}  {m['title']}")))
         except (OSError, ValueError, KeyError, TypeError):
             continue  # unreadable meta.json: leave it out rather than fail the listing
     print("\n".join(r for _, r in sorted(rows, reverse=True)) or "(no threads)")
@@ -685,8 +741,8 @@ def cmd_list(a):
 def cmd_export(a):
     tid = resolve(a.id)
     m = meta(tid)
-    print(f"# {m['title']}\n\n`{tid}` · kind: {m['kind'] or '-'} · status: {m['status']} · "
-          f"created: {m['created']}\n\n## Summary\n\n{summary(tid).strip() or '(none)'}\n\n## Notes\n")
+    print(printable(f"# {m['title']}\n\n`{tid}` · kind: {m['kind'] or '-'} · status: {m['status']} · "
+                    f"created: {m.get('created')}\n\n## Summary\n\n{summary(tid).strip() or '(none)'}\n\n## Notes\n"))
     for e in entries(tid):
         if e[3] == "note":
             print(printable(f"- {e[1]}: {e[5]}"))
@@ -695,7 +751,7 @@ def cmd_export(a):
 def cmd_hook(a):
     """Claude Code hook entry point. Never fails the session: errors go to errors.log."""
     try:
-        raw = sys.stdin.read()
+        raw = sys.stdin.read().lstrip("\ufeff")  # PowerShell may put a byte-order mark first
         if not raw.strip():
             return  # run by hand with nothing on stdin
         d = json.loads(raw)
@@ -721,7 +777,7 @@ def cmd_hook(a):
                   + (f"\n\n{stale} entries were logged after this summary, so it may be out of date: "
                      f"write a fresh `thread checkpoint` now." if stale or not text else ""))
         elif tid:
-            print(f"Active thread: {tid} ({meta(tid)['title']}). This session is captured into it.")
+            print(printable(f"Active thread: {tid} ({meta(tid)['title']}). This session is captured into it."))
         else:
             norm = lambda path: os.path.normcase(os.path.realpath(path)).rstrip(os.sep)
             here, near = norm(d.get("cwd") or os.getcwd()), []
@@ -798,8 +854,8 @@ def main(argv=None):
     a = p.parse_args(argv)
     try:
         a.fn(a)
-    except json.JSONDecodeError as e:  # the hook has its own handler and never gets here
-        die(f"a state or meta.json file under {home()} is not valid JSON ({e}); repair or remove it")
+    except ValueError as e:  # a damaged meta.json; the hook has its own handler and never gets here
+        die(f"{e}: repair or remove the file under {home()}")
 
 
 if __name__ == "__main__":

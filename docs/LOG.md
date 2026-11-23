@@ -99,6 +99,18 @@
   earlier session; escape sequences in titles and exported notes; a corrupt `meta.json` gave a
   traceback; an existing `THREADS_HOME` folder was set to mode 0700; an empty hook stdin wrote an
   error. Tests 29 -> 30.
+- 2026-11-22: Review of 93a553c (two fresh subagents, one blind). No high-severity finding.
+  - Owner decision: a per-session lock for capture, stale after 5 seconds. A waiting command does
+    not skip; it waits for the lock to be released or to go stale. Eight parallel `thread note`
+    calls after 200 new transcript lines now store each line once (400 copies before).
+  - Completed fixes that fell short in 93a553c: `~/.threads` is always set to 0700 again (only an
+    existing `THREADS_HOME` folder keeps its mode); `--kind`, the exported summary and all printed
+    headers are stripped of control characters, now including C1 codes and bidi overrides; a
+    `meta.json` of the wrong shape or encoding gives a message; `open` keeps lines of its own second.
+  - New: a command in a session whose thread was closed or removed elsewhere says so. A captured line
+    that would look like a header once printed is indented. Ids no longer end in `-`. The hook
+    accepts a byte-order mark. The own-grep rule knows `timeout`, `{`, `!` and `/usr/bin/env`.
+  - Tests 30 -> 32.
 
 ## Research notes
 

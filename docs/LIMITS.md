@@ -13,13 +13,17 @@ The short version is in the [README](../README.md#what-it-does-not-capture).
   and the first page of `grep`.
 - `thread new` in a session that had no thread captures the session from its start. `thread open`
   and `thread reopen` capture from that moment on; what the session did before is not stored.
+- When the tool cannot find the session's transcript file at the moment of `thread open` (or of a
+  switch to another thread), it captures only lines stamped from that second on. A switch then
+  loses the last lines that belonged to the previous thread.
 - No hook runs when you interrupt a turn or when a session is killed. That turn is captured by the
   next hook or `thread` command in the same session, or not at all if the session is never used
   again. After `thread close`, the rest of the closing turn is not captured.
 - If Claude Code replaces a transcript file with a shorter one, the file is captured again from its
   start (duplicate entries); if it rewrites it at the same or greater length, new lines can be missed.
-- Two captures of one session at the same moment (for example parallel subagents each running a
-  `thread` command) can store the same lines more than once.
+- Commands and hooks of one session capture one at a time, through a lock file. A lock older than
+  5 seconds is taken to be left by a process that died and is removed, so a command waits at most
+  that long.
 - A background subagent's finishing notice and a message from another agent are logged with the
   entry type `subagent`; the report a foreground subagent returns is the `tool_result` of its Agent
   call; a background shell's notice is `notification`; Claude Code's own summary at a compaction is
@@ -61,7 +65,7 @@ The short version is in the [README](../README.md#what-it-does-not-capture).
   history too.
 - Lines in a transcript that carry another session's id are not captured.
 - When one session closes or removes a thread, another session bound to it is detached at its next
-  capture, and what that session did since its last capture is not stored. This holds even if the
+  capture (its next `thread` command says so), and what that session did since its last capture is not stored. This holds even if the
   thread is reopened or recreated in between; run `thread open` to bind again.
 - A session that gets a new session id (for example after `/clear`) is not bound; run `thread open`
   again.
@@ -82,6 +86,6 @@ Each of these was considered and left out. Add one when its trigger shows up.
 | Per-kind templates | Kind is only a label. | Bug and project summaries clearly need different headings. |
 | Parent/child links | Threads are flat; name the related id in a note. | Related threads become hard to find with `grep --all`. |
 | Capture of subagents' internal steps | Logs would grow many times over. | A subagent's internal steps are needed for recall. |
-| Locking | Appends are one write per entry (atomic on POSIX, and on Windows through `FILE_APPEND_DATA`); the summary is last-writer-wins with every version in the log. Two captures of the same session at the same instant can duplicate entries. | Duplicate or lost entries appear. |
+| Locking between sessions | Each session has its own lock for capture. Appends from different sessions are one write each (atomic on POSIX, and on Windows through `FILE_APPEND_DATA`); the summary is last-writer-wins with every version in the log. | Two sessions on one thread lose or interleave entries. |
 | `thread delete` | `rm -rf ~/.threads/<id>` does it. | A retention rule needs an audited command. |
 | `thread rename` | Ids are rarely typed in full; a prefix works. | A title turns out badly wrong often. |

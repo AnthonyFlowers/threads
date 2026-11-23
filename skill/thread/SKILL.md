@@ -38,8 +38,10 @@ All commands are the local `thread` CLI. It uses no network.
 - To see whether this session has an active thread, run `thread list`: `*` marks it.
 - If a command prints `no Claude Code session id: nothing bound`, capture is off. Tell the user, and
   pass `-t <id>` on every command.
-- `note`, `checkpoint` and `close` need text on stdin. Without it they fail (`empty text`, or
-  after a 5-second wait).
+- `note`, `checkpoint` and `close` need text; pass it on stdin (arguments also work for plain
+  words). Without text they fail (`empty text`, or after a 5-second wait).
+- If a command says the thread "was closed or removed by another session", this session is no
+  longer captured. Tell the user, and open the thread again only if they ask.
 - Run `thread grep` as a command on its own. Its call and output are stored but never searched
   (the output only repeats the log), and anything else the same shell command prints becomes
   unsearchable with it.

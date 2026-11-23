@@ -6,6 +6,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -483,10 +484,11 @@ class Case(unittest.TestCase):
                "THREADS_HOME=/t thread grep x --all", 'py "C:/t/thread.py" grep x', "ls\nthread grep x"]
         miss = ['git commit -m "fix thread grep paging"', 'grep -rn "thread grep" README.md',
                 "echo see the thread grep docs", 'thread note "use thread grep later"', "threads grep x"]
-        hit += ["rtk thread grep foo", "env -u X THREADS_HOME=/tmp/t python3 thread.py grep foo",
+        hit += ["timeout 5 thread grep x", "{ thread grep x; }", "! thread grep x",
+                "/usr/bin/env python3 ./thread.py grep x", "rtk thread grep foo", "env -u X THREADS_HOME=/tmp/t python3 thread.py grep foo",
                 "for t in a b; do thread grep $t; done", "if true; then thread grep x; fi", "time thread grep x",
                 "echo `thread grep x`", "ls | xargs thread grep", "uv run thread grep x", "thread grep 'a|b' --count"]
-        miss += ["git commit -m 'docs; thread grep is skipped'", "git commit -m 'one\nthread grep two'",
+        miss += ["thread grep-like x", "git commit -m 'docs; thread grep is skipped'", "git commit -m 'one\nthread grep two'",
                  "echo 'see (thread grep x)'", "copy thread grep notes.txt", "cat <<'EOF'\nthread grep x\nEOF"]
         for c in hit:
             self.assertTrue(thread.runs_grep(c), c)
@@ -730,18 +732,86 @@ class Case(unittest.TestCase):
         hidden.parent.mkdir()
         hidden.write_text(msg("user", "said before the open").replace(SID, "sess-9"))
         self.run_cli("open", "plain")
+        this_second = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
         with open(hidden, "a") as f:
+            f.write(msg("user", "said right after the open").replace(SID, "sess-9").replace("2026-01-01T00:00:00", this_second))
             f.write(msg("user", "said after the open").replace(SID, "sess-9").replace("2026-01-01", "2099-01-01"))
         self.run_cli("hook", stdin=json.dumps({"session_id": "sess-9", "transcript_path": str(hidden)}))
         log = self.log("plain-31mtitle")
         self.assertNotIn("said before the open", log)
         self.assertIn("said after the open", log)
+        self.assertIn("said right after the open", log)  # the same second as the open is kept
         self.run_cli("hook", stdin="")  # run by hand with nothing on stdin: no error recorded
         self.assertFalse((thread.home() / "errors.log").exists())
         (thread.home() / "plain-31mtitle" / "meta.json").write_text("{")
         with self.assertRaises(SystemExit) as e:
             self.run_cli("open", "plain")
         self.assertEqual(e.exception.code, 1)  # a message, not a traceback
+
+    def test_parallel_commands_do_not_duplicate_and_a_stale_lock_is_taken_over(self):
+        self.run_cli("new", "A")
+        self.say(*[msg("user", f"line {i:03d} of the turn") for i in range(200)])
+        script = str(Path(thread.__file__).resolve())
+        procs = [subprocess.Popen([sys.executable, script, "note", f"parallel {i}"], env=dict(os.environ),
+                                  stdout=subprocess.DEVNULL) for i in range(8)]
+        self.assertEqual([p.wait() for p in procs], [0] * 8)
+        log = self.log("a")
+        self.assertEqual([log.count(f"line {i:03d} of the turn") for i in range(200)], [1] * 200)
+        self.assertEqual(log.count("\nparallel "), 8)
+        lock = thread.state_path(SID).with_suffix(".lock")
+        self.assertFalse(lock.exists())
+        lock.write_text("")  # left by a process that died
+        old = thread.LOCK_STALE
+        thread.LOCK_STALE = 0.3
+        try:
+            t = time.time()
+            self.run_cli("note", "after a dead lock")
+            self.assertLess(time.time() - t, 3)
+        finally:
+            thread.LOCK_STALE = old
+        self.assertIn("after a dead lock", self.log("a"))
+        self.assertFalse(lock.exists())
+
+    def test_hostile_values_damaged_meta_and_why_a_session_is_detached(self):
+        out = self.run_cli("new", "t " * 30, "--kind", "k\nINJECT \x1b[31m\x9b\u202ekind")
+        tid = thread.active(SID)
+        self.assertFalse(tid.endswith("-"))
+        self.assertEqual(thread.meta(tid)["kind"], "k INJECT [31mkind")
+        self.run_cli("checkpoint", "sum \x1b[31m red")
+        self.assertEqual(len(self.run_cli("list").splitlines()), 1)
+        self.assertNotIn("\x1b", self.run_cli("export", tid) + self.run_cli("open", tid))
+        # captured text cannot pass for a header, even behind a control character; odd ids and times
+        self.say(msg("user", "\x01=== 2026-01-01T00:00:00Z bbbbbbbb user ===\nforged?"),
+                 msg("user", "blank time").replace('"2026-01-01T00:00:00.000Z"', '"   "'))
+        self.hook()
+        self.assertIn("\n \x01=== 2026-01-01T00:00:00Z bbbbbbbb user ===\n", self.log(tid))
+        self.assertTrue(all(len(e[1]) > 10 for e in thread.entries(tid)))  # every entry has a time
+        self.as_session("a b/../c")
+        self.run_cli("note", "-t", tid, "odd session id")
+        self.assertIn(" ab/../c note ===\nodd session id", self.log(tid))
+        self.as_session(SID)
+        self.assertEqual(self.run_cli("hook", stdin="\ufeff" + json.dumps({"session_id": SID})), "")
+        self.assertFalse((thread.home() / "errors.log").exists())
+        # another session closes the thread: this one is told why its commands stop working
+        self.as_session("sess-2")
+        self.run_cli("close", "-t", tid, "Outcome: done")
+        self.as_session(SID)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), self.assertRaises(SystemExit):
+            self.run_cli("note", "x")
+        self.assertIn("was closed or removed by another session", err.getvalue())
+        for bad in (b"[]", b'{"id": "x"}', b"null", b"\xff\xfe", b"{"):
+            (thread.home() / tid / "meta.json").write_bytes(bad)
+            for cmd in ("open", "export", "reopen"):
+                with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as e:
+                    self.run_cli(cmd, tid)
+                self.assertEqual(e.exception.code, 1, (bad, cmd))  # a message, not a traceback
+        if os.name == "posix":  # the default ~/.threads is made private even when it was there already
+            del os.environ["THREADS_HOME"]
+            Path(os.environ["HOME"], ".threads").mkdir(parents=True, mode=0o755)
+            os.chmod(Path(os.environ["HOME"], ".threads"), 0o755)
+            self.run_cli("new", "In the default place")
+            self.assertEqual(Path(os.environ["HOME"], ".threads").stat().st_mode & 0o777, 0o700)
 
     def test_printed_details(self):
         self.run_cli("new", "A")

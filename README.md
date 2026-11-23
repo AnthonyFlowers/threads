@@ -174,11 +174,12 @@ captures by itself and would hide a missing hook.
 
 | Sign | Likely cause |
 |---|---|
+| A command says the thread "was closed or removed by another session" | Another session closed, reopened or removed it; this session stopped being captured at that point. Open it again. |
 | `thread list` (run by the agent) shows no `*` | New session, `/clear` or fork; or another session closed or removed the thread. Say "open the X thread" or "continue the X work". |
 | `no Claude Code session id: nothing bound` | Claude Code older than 2.1.132, or the command was run outside Claude Code. |
 | The count in "Check the install" does not rise | `thread` not on the `PATH` Claude Code was started with; hooks blocked by policy (`/hooks`); folder not trusted. |
 | `thread list` prints "hook errors are recorded in ..." | Read `errors.log`; it holds the traceback. Delete it when solved. |
-| The same lines appear twice in a log | Two captures ran at once, or Claude Code replaced a transcript file (see docs/LIMITS.md). |
+| The same lines appear twice in a log | A message arrived while a turn was running and Claude Code recorded it twice (both are kept by design), or Claude Code replaced a transcript file (see docs/LIMITS.md). |
 
 ## Commands
 
@@ -209,11 +210,13 @@ still adds to one.
   <id>/meta.json     id, title, kind, status, created, cwd, uid, closes (after a close)
   <id>/log.txt       append-only; each entry starts "=== <time> <session id, 8 chars> <entry type> [tool] [call id] ==="
   <id>/summary.md    current summary
-  .sessions/         which thread each session is bound to, and how much of it is captured
+  .sessions/         which thread each session is bound to, and how much of it is captured;
+                     a `.lock` file exists only while one command or hook is capturing
   errors.log         hook failures (a hook never blocks a session)
 ```
 
-`THREADS_HOME` overrides the directory (an existing folder keeps its own permissions). To remove a thread: `rm -rf ~/.threads/<id>`. A session
+`THREADS_HOME` overrides the directory. `~/.threads` is always set to mode 0700; a folder named by
+`THREADS_HOME` that already exists keeps its own permissions. To remove a thread: `rm -rf ~/.threads/<id>`. A session
 bound to a removed or closed thread is treated as detached.
 
 The log contains whatever your tools printed, including any secrets, and text from other
