@@ -515,7 +515,13 @@ def activity(tid):
     return log.stat().st_mtime if log.exists() else 0
 
 
-def show(tid):
+def show_cmd(tid, n, cur):
+    """The command that prints log line n of tid whole; it names the thread unless that is the
+    caller's active thread, so the hint as printed never shows a line of another thread."""
+    return f"thread show {'' if tid == cur else f'-t {tid} '}{n}"
+
+
+def show(tid, cur=None):
     m = meta(tid)
     print(printable(f"# {m['title']}  [{tid}]  kind={m['kind'] or '-'}  status={m['status']}") + "\n")
     print(printable(summary(tid).strip()) or "(no checkpoint yet)")
@@ -527,7 +533,7 @@ def show(tid):
     notes = [e for e in since if e[3] == "note"]
     msgs = [e for e in since if e[3] in ("user", "assistant")][-6:]
     text = printable("\n".join(
-        f"[{e[1]} {e[3]}] {e[5][:600]}{f'… [clipped; thread show {e[0]}]' if len(e[5]) > 600 else ''}"
+        f"[{e[1]} {e[3]}] {e[5][:600]}{f'… [clipped; {show_cmd(tid, e[0], cur)}]' if len(e[5]) > 600 else ''}"
         for e in sorted(notes + msgs)))
     if len(text) > CAP:
         text = "…" + text[-CAP:]
@@ -557,13 +563,34 @@ def cmd_new(a):
           + (f"; {n} earlier transcript lines of this session were captured into it" if n else ""))
 
 
+def recover(tid, sid):
+    """Capture the uncaptured tail of other sessions bound to tid whose transcript is still on
+    disk: a session that was interrupted and then archived got no hook for its last turn."""
+    for p in sorted((home() / ".sessions").glob("*.json")):
+        other = p.stem
+        if other == sid or bound(state(other)) != tid or not find_transcript(other):
+            continue
+        try:
+            n = capture(other)  # under that session's lock and id; its offset advances
+        except Exception as e:
+            print(f"thread: could not check session {other[:8]} for uncaptured work ({type(e).__name__})",
+                  file=sys.stderr)
+            continue
+        if n:
+            print(f"recovered {n} transcript lines from session {other[:8]} that ended without a capture "
+                  f"(or is still running); they are at the end of the log, after later entries\n")
+
+
 def cmd_open(a):
     tid = resolve(a.id)
-    show(tid)
+    sid = session_id()
+    recover(tid, sid)
+    # after this command the thread is the caller's active one only if it is open and can be bound
+    show(tid, tid if is_open(tid) and state_path(sid) else None)
     if meta(tid)["status"] == "closed":
         print(f"\n(closed: shown read-only, not bound; `thread reopen {tid}` to work on it again)")
     else:
-        bind(session_id(), tid)
+        bind(sid, tid)
 
 
 def cmd_reopen(a):
@@ -623,12 +650,12 @@ def cmd_detach(a):
 
 
 def clip(line, start=0, n=None):
-    """At most 400 characters of a log line; `n` is its line number, for the hint to the whole entry."""
+    """At most 400 characters of a log line; `n` is the command that prints the whole entry."""
     line = printable(line)
     if len(line) <= 400:
         return line
     s = max(0, start - 150)
-    return ("…" if s else "") + line[s:s + 400] + "…" + (f" [clipped; thread show {n}]" if n else "")
+    return ("…" if s else "") + line[s:s + 400] + "…" + (f" [clipped; {n}]" if n else "")
 
 
 def cmd_show(a):
@@ -662,6 +689,7 @@ def cmd_grep(a):
     if types - set(TYPES):
         die(f"unknown entry type {', '.join(sorted(types - set(TYPES)))}; the types are {', '.join(TYPES)}")
     ctx = min(max(a.context, 0), 3)
+    cur = active(session_id())
     hits = []  # (entry time, thread, entry line, line, header, {line: text} with context)
     by_type, by_thread = {}, {}
     for tid in (all_ids() if a.all else [target(a)]):
@@ -705,7 +733,7 @@ def cmd_grep(a):
                 lo -= 1
             while hi - i < ctx and hi + 1 < len(lines) and not heads[hi + 1]:
                 hi += 1
-            near = {j + 1: clip(lines[j], m.start() if j == i else 0, j + 1) for j in range(lo, hi + 1) if j > start}
+            near = {j + 1: clip(lines[j], m.start() if j == i else 0, show_cmd(tid, j + 1, cur)) for j in range(lo, hi + 1) if j > start}
             hits.append((head.split()[1][:19] if head else "", tid, start + 1, i + 1, head, near))
     total = sum(by_type.values())
     spread = lambda d: ", ".join(f"{k} {v}" for k, v in sorted(d.items(), key=lambda kv: -kv[1]))

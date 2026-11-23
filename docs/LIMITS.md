@@ -17,8 +17,15 @@ The short version is in the [README](../README.md#what-it-does-not-capture).
   switch to another thread), it captures only lines stamped from that second on. A switch then
   loses the last lines that belonged to the previous thread.
 - No hook runs when you interrupt a turn or when a session is killed. That turn is captured by the
-  next hook or `thread` command in the same session, or not at all if the session is never used
-  again. After `thread close`, the rest of the closing turn is not captured.
+  next hook or `thread` command in the same session. If the session is never used again (interrupted,
+  then archived), the next `thread open` of that thread from any session captures the rest of its
+  transcript, under the earlier session's id, and prints `recovered N transcript lines from session
+  <id> that ended without a capture (or is still running); ...`. The recovered entries are at the end
+  of the log, after entries that are newer by their time stamp. Nothing is recovered when the
+  transcript file is gone (deleted, or made on another machine), when that session is bound to
+  another thread or detached by then, or when the thread was closed in between; that work is then
+  not in the log, and nothing says so. A session still running on the same thread is captured early
+  by the same step, which is harmless. After `thread close`, the rest of the closing turn is not captured.
 - If Claude Code replaces a transcript file with a shorter one, the file is captured again from its
   start (duplicate entries); if it rewrites it at the same or greater length, new lines can be missed.
 - Commands and hooks of one session capture one at a time, through a lock file. A lock older than
@@ -40,7 +47,8 @@ The short version is in the [README](../README.md#what-it-does-not-capture).
 - Thinking is stored only when the transcript holds its text. Current Claude Code leaves most
   thinking blocks empty.
 - `thread grep` and `thread open` clip what they print (400 and 600 characters per line or entry)
-  and end the clipped text with `[clipped; thread show N]`. `thread show <line>` prints the whole
+  and end the clipped text with `[clipped; thread show N]`, or `[clipped; thread show -t <id> N]`
+  when that thread is not (for `open`: will not be) the caller's active thread. `thread show <line>` prints the whole
   entry that contains that log line, however long it is. When `thread open` has more than about
   6000 characters of notes and messages to print, it drops the oldest from the top with no hint.
 - Recall costs tokens and does not always help: in the paper, on a task where summaries were

@@ -116,11 +116,17 @@ session is captured too (the command says how many lines); tell the user.
    notes and latest messages; the other types are not shown, grep for them. A few are normal (the
    end of the turn that wrote the checkpoint); many mean the summary is stale. With none it prints
    `0 entries since the last checkpoint: the summary is current.` An entry above 600 characters
-   ends with `[clipped; thread show N]`: run that for the whole entry. Capture starts at this point: what the
+   ends with `[clipped; thread show N]`: run that for the whole entry. A first line
+   `recovered N transcript lines from session <id> that ended without a capture ...` means an
+   earlier session stopped (interrupted, archived) before its last turn was logged, so its
+   summary and notes may not cover its last actions: grep the end of the log for them
+   (`thread grep --type tool_use,assistant '<word>'`). No such line does not prove the log is complete (the
+   transcript may be gone). Capture starts at this point: what the
    session did before is not logged, so note anything from it that matters.
 3. Facts about a repository in the summary (branch head, commit ids, "tests green") go stale when
-   the repository changes outside the thread. Verify them (`git log`, `git status`) before you
-   rely on them.
+   the repository changes outside the thread, and a session that was cut off may have written
+   files the summary does not mention. Verify on disk (`git log`, `git status`, the files
+   themselves) before you rely on the summary.
 4. Tell the user in two or three lines where the work stands and the next step. Grep for what you
    still need. Checkpoint once you have caught up.
 
@@ -181,7 +187,8 @@ that were actually used and try alternatives: `thread grep 'timeout|timed out|ET
   `--` marks lines left out inside one. The header of a tool result ends with `<- ` and the call
   that produced it. When the match is in the header itself (a call id, a tool name), no line
   carries `>`.
-- Printed lines are clipped to 400 characters and then end with `[clipped; thread show N]`. For
+- Printed lines are clipped to 400 characters and then end with `[clipped; thread show N]`, or
+  `[clipped; thread show -t <id> N]` for a thread that is not the active one; run it as printed. For
   the whole entry, run `thread show <line>` with any line number of it (`-t <id>` for a thread
   that is not the active one). Do not read `log.txt` with `sed` or `cat` for this.
 

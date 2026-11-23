@@ -860,6 +860,32 @@ class Case(unittest.TestCase):
             self.run_cli("new", "In the default place")
             self.assertEqual(Path(os.environ["HOME"], ".threads").stat().st_mode & 0o777, 0o700)
 
+    def test_open_recovers_the_tail_of_an_earlier_session(self):
+        self.run_cli("new", "A")
+        self.say(msg("user", "captured at turn end"))
+        self.hook()
+        self.say(msg("assistant", "written after the last hook"), msg("user", "and one more"))
+        os.environ["CLAUDE_CODE_SESSION_ID"] = "sess-2"  # the first session was interrupted and archived
+        out = self.run_cli("open", "a")
+        self.assertIn("recovered 2 transcript lines from session sess-1 that ended without a capture", out)
+        self.assertIn("written after the last hook", out)  # recovered before the thread is shown
+        self.assertIn("=== 2026-01-01T00:00:00.000Z sess-1 assistant ===\nwritten after", self.log("a"))
+        self.assertNotIn("recovered", self.run_cli("open", "a"))  # the offset advanced
+        self.assertEqual(self.log("a").count("written after the last hook"), 1)
+        os.environ["CLAUDE_CODE_SESSION_ID"] = SID
+        self.run_cli("new", "B")  # the earlier session is bound to another thread now
+        self.say(msg("user", "belongs to b"))
+        os.environ["CLAUDE_CODE_SESSION_ID"] = "sess-2"
+        self.assertNotIn("recovered", self.run_cli("open", "a"))
+        self.assertNotIn("belongs to b", self.log("a") + self.log("b"))  # left for its own capture
+        os.environ["CLAUDE_CODE_SESSION_ID"] = SID
+        self.run_cli("open", "a")
+        self.say(msg("user", "lost with the transcript"))
+        self.transcript.unlink()
+        os.environ["CLAUDE_CODE_SESSION_ID"] = "sess-2"
+        self.assertNotIn("recovered", self.run_cli("open", "a"))  # transcript gone: nothing to do
+        self.assertNotIn("lost with the transcript", self.log("a"))
+
     def test_printed_details(self):
         self.run_cli("new", "A")
         self.run_cli("new", "B", "--kind", "bug")
@@ -876,7 +902,18 @@ class Case(unittest.TestCase):
         self.assertIn("* a  -  open", self.run_cli("list"))  # `open a` made it active
         page = self.run_cli("grep", "needle", "--context", "0", "-t", "b").splitlines()
         self.assertEqual(len(page), 3)  # location, the match alone, footer
-        self.assertEqual(page[1], "> 6: …" + "p" * 149 + " needle " + "q" * 243 + "… [clipped; thread show 6]")
+        self.assertEqual(page[1], "> 6: …" + "p" * 149 + " needle " + "q" * 243 + "… [clipped; thread show -t b 6]")  # b is not the active thread
+        self.assertIn("[clipped; thread show -t b 6]", self.run_cli("grep", "needle", "--all"))
+        self.run_cli("open", "b")
+        self.assertIn("… [clipped; thread show 6]", self.run_cli("grep", "needle", "--all"))  # active now
+        os.environ["CLAUDE_CODE_SESSION_ID"] = ""  # nothing bound: every hint names its thread
+        self.assertIn("[clipped; thread show -t b 6]", self.run_cli("grep", "needle", "-t", "b"))
+        self.assertIn("[clipped; thread show -t b 5]", self.run_cli("open", "b"))
+        os.environ["CLAUDE_CODE_SESSION_ID"] = SID
+        self.run_cli("close", "-t", "b", "done")
+        self.run_cli("note", "-t", "b", "late " + "r" * 700)
+        self.assertRegex(self.run_cli("open", "b"), r"\[clipped; thread show -t b \d+\]")  # closed: not bound
+        self.run_cli("open", "a")
         self.assertEqual(self.run_cli("grep", "^created", "--context", "3", "-t", "a").count("created: A"), 1)
         self.assertNotIn("cut at", self.hook("SessionStart"))
         self.run_cli("checkpoint", stdin="S" * (thread.CAP + 1))
