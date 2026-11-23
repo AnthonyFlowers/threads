@@ -139,7 +139,8 @@ new log then holds copies of the older threads' text, and `thread grep` matches 
    earlier session stopped (interrupted, archived) before its last turn was logged, so its
    summary and notes may not cover its last actions. The line ends with the command that prints
    exactly those entries (`they are log lines A-B ...: see them with `thread show --from A K``; one line
-   per recovered session): run it before you do anything
+   per recovered session; above 10 entries it adds that `--type assistant,tool_use` gives a
+   shorter page): run it before you do anything
    else in the thread. Long entries are clipped there with a `[clipped; thread show N]` hint. No such line does not prove the log is complete (the
    transcript may be gone). Capture starts at this point: what the
    session did before is not logged, so note anything from it that matters.
@@ -194,9 +195,12 @@ the thread and the line of the entry's header.
 
 - Always single-quote the regex. Put `--` before a pattern that starts with `-`, with any options
   ahead of it: `thread grep --count -- '--max'` (without the `--` the command fails and names this fix).
-- A search that runs longer than 3 s is stopped with `thread: the pattern took longer than 3 s and
-  was stopped: simplify it ...`. The cause is a repeat inside a repeat (`(a+)+`, `(\w+\s*)*x`):
-  write the pattern without it. A pattern is matched against one log line at a time.
+- A search that runs longer than 3 s is stopped, and the message names the cause. `thread: the
+  search was stopped after 3 s, stuck on the pattern: simplify it ...`: a repeat inside a repeat
+  (`(a+)+`, `(\w+\s*)*x`); write the pattern without it. `... still reading through very large
+  logs: narrow it with ...`: the pattern is fine and the logs are large (mostly with `--all`);
+  search one thread (`-t <id>`) or fewer entry types (`--type`). A pattern is matched against
+  one log line at a time.
 - A tool call is stored as `key: value` lines (`command: ...`, `file_path: ...`), so a command or
   path can be searched as typed. A call and its result carry the same call id in their headers;
   grep that id to see both (with `--context 3` for more of each).

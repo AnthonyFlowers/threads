@@ -14,6 +14,8 @@ import re
 import sys
 import time
 import traceback
+import unicodedata
+import zlib
 from pathlib import Path
 
 CAP = 6000  # max characters printed back to the agent per page (the paper's figure)
@@ -297,9 +299,12 @@ def find_transcript(sid):
 
 
 def own_transcript(path, sid):
-    """False for a transcript file that is named after another session and holds no line of sid."""
+    """False for a transcript file that is named after another session and holds no line of sid,
+    and for a subagent's own file (<sid>/subagents/agent-<id>.jsonl): its lines carry sid too."""
     if Path(path).name == f"{sid}.jsonl" or not os.path.isfile(path):
         return True  # not a file: handled as before (nothing captured, or an error in errors.log)
+    if Path(path).parent.name == "subagents":
+        return False
     with open(path, encoding="utf-8", errors="replace") as f:
         for line in f:
             if sid in line:
@@ -489,6 +494,11 @@ def _capture(sid, tpath):
         first = st.get("offset", 0)
         if not isinstance(first, int) or not 0 <= first <= len(lines):
             first = 0  # the transcript was replaced by a shorter one, or the state is damaged
+        # the first line names the file: another one means a new file at the same path, however long.
+        # A state written before this was stored has none and is trusted as before.
+        head = f"{len(lines[0])}-{zlib.crc32(lines[0].encode('utf-8', 'replace')):08x}" if lines else None
+        if st.get("head") not in (None, head):
+            first = 0
         parts, seen = [], set()
         for n, line in enumerate(lines[first:] if tid else [], first + 1):
             try:
@@ -499,7 +509,7 @@ def _capture(sid, tpath):
         parts = [x for x in parts if x]
         if parts:
             append(tid, "".join(parts))
-        st["offset"] = len(lines)  # with no thread (detached) the lines are skipped for good
+        st["offset"], st["head"] = len(lines), head  # with no thread (detached) the lines are skipped for good
         write(state_path(sid), json.dumps(st))
         return len(parts)
     write(state_path(sid), json.dumps(st))
@@ -722,7 +732,8 @@ def recover(tid, sid, cur=None):
             k = sum(1 for l in lines[first - 1:] if HDR.match(l))
             print(f"recovered {n} transcript lines from session {other[:8]} that ended without a capture "
                   f"(or is still running); they are log lines {first}-{len(lines)}, after later entries: "
-                  f"see them with `{show_cmd(tid, f'--from {first} {k}', cur)}`\n")
+                  f"see them with `{show_cmd(tid, f'--from {first} {k}', cur)}`"
+                  + (" (add `--type assistant,tool_use` for a shorter page)" if k > 10 else "") + "\n")
 
 
 def cmd_open(a):
@@ -908,17 +919,27 @@ def cmd_show(a):
 
 
 GREP_SECONDS = 3  # a search of the log takes far less; a pattern with nested repeats can take years
+GREP_TICK = 4096  # log lines between two signs of progress to the watchdog
 
 # A second process, because the regex engine holds the interpreter lock while it matches: no thread
 # of this process could stop it, and SIGALRM does not exist on Windows. It ends when its stdin
 # closes (the search is done, or this process is gone); after the deadline it stops this process.
-WATCHDOG = """import os, signal, sys, threading
-t = threading.Thread(target=sys.stdin.read, daemon=True)
+WATCHDOG = """import os, signal, sys, threading, time
+last = [time.time()]
+def read():
+    while os.read(0, 4096):  # a byte arrives as the search moves on through the log lines
+        last[0] = time.time()
+t = threading.Thread(target=read, daemon=True)
 t.start()
 t.join(float(sys.argv[2]))
 if t.is_alive():
-    sys.stderr.write("thread: the pattern took longer than %s s and was stopped: simplify it "
-                     "(a repeat inside a repeat, like `(a+)+`, is the usual cause)\\n" % sys.argv[2])
+    if time.time() - last[0] >= float(sys.argv[2]) / 2:
+        why = ("stuck on the pattern: simplify it (a repeat inside a repeat, like `(a+)+`, "
+               "is the usual cause)")
+    else:
+        why = ("still reading through very large logs: narrow it with `-t <id>` (not `--all`) or "
+               "`--type <types>`; if the pattern is slow on every line, simplify it")
+    sys.stderr.write("thread: the search was stopped after %s s, %s\\n" % (sys.argv[2], why))
     sys.stderr.flush()
     os.kill(int(sys.argv[1]), signal.SIGTERM)
 """
@@ -933,8 +954,12 @@ def deadline(seconds):
                              stdin=subprocess.PIPE, stdout=subprocess.DEVNULL)
     except OSError:
         w = None  # shortcut: no second process, no time bound; the search itself must not fail for it
+    def tick():  # progress: at the deadline the watchdog can tell large logs from a stuck pattern
+        if w:
+            with contextlib.suppress(OSError):
+                os.write(w.stdin.fileno(), b".")
     try:
-        yield
+        yield tick
     finally:
         if w:
             with contextlib.suppress(OSError):
@@ -957,8 +982,8 @@ def cmd_grep(a):
     hits = []  # (entry time, thread, entry line, line, header, {line: text} with context)
     by_type, by_thread = {}, {}
     ids = all_ids() if a.all else [target(a)]
-    with deadline(GREP_SECONDS):  # state changes (the capture) are done; only reading from here on
-        _search(a, rx, ids, types, ctx, cur, hits, by_type, by_thread)
+    with deadline(GREP_SECONDS) as tick:  # state changes (the capture) are done; only reading from here on
+        _search(a, rx, ids, types, ctx, cur, hits, by_type, by_thread, tick)
     total = sum(by_type.values())
     spread = lambda d: ", ".join(f"{k} {v}" for k, v in sorted(d.items(), key=lambda kv: -kv[1]))
     extra = ([f"[by type: {spread(by_type)}]"] if len(by_type) > 1 else []) + \
@@ -983,16 +1008,22 @@ def cmd_grep(a):
     print("\n".join([f"[matches {first + 1 if shown else 0}-{end if shown else 0} of {total}{more}]"] + extra))
 
 
-def _search(a, rx, ids, types, ctx, cur, hits, by_type, by_thread):
+def _search(a, rx, ids, types, ctx, cur, hits, by_type, by_thread, tick=lambda: None):
     for tid in ids:
         p = home() / tid / "log.txt"
         if not p.exists():
             continue
         # shortcut: reads the whole log into memory; stream it if logs reach hundreds of MB
         lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
-        heads = [bool(HDR.match(l)) for l in lines]
+        tick()
+        heads = []
+        for k in range(0, len(lines), GREP_TICK * 16):
+            heads += [bool(HDR.match(l)) for l in lines[k:k + GREP_TICK * 16]]
+            tick()
         head, start, kind, skip, calls, own_ids = "", 0, "", False, {}, set()
         for i, line in enumerate(lines):
+            if not i % GREP_TICK:
+                tick()
             if heads[i]:
                 f = line.split()
                 head, start, kind = printable(line), i, f[3]
@@ -1087,6 +1118,27 @@ def cmd_export(a):
             print(printable(f"- {e[1]}: " + re.sub(r"\n(?=[^\n])", "\n  ", e[5])))
 
 
+def folds_case(path):
+    """True when the file system at path (or at its nearest folder that exists) takes another
+    letter case for the same file, as macOS and Windows do."""
+    while not os.path.exists(path):
+        path, was = os.path.dirname(path), path
+        if path == was:
+            return False
+    try:
+        return path.swapcase() != path and os.path.samefile(path, path.swapcase())
+    except OSError:
+        return False
+
+
+def file_id(path):
+    try:
+        s = os.stat(path)
+        return (s.st_dev, s.st_ino) if s.st_ino else None
+    except OSError:
+        return None
+
+
 def cmd_hook(a):
     """Claude Code hook entry point. Never fails the session: errors go to errors.log."""
     try:
@@ -1101,7 +1153,10 @@ def cmd_hook(a):
         if start and d.get("source") == "fork" and not state(sid):
             # the fork's transcript begins with a copy of its parent's lines: mark where it starts
             write(state_path(sid), json.dumps({"offset": 0, "thread": None, "fresh": True, "since": now()}))
-        capture(sid, d.get("transcript_path"))
+        tpath = d.get("transcript_path")
+        if d.get("agent_id") and Path(str(tpath)).name != f"{sid}.jsonl":
+            tpath = None  # a subagent's hook: its own file must never set the session's offset
+        capture(sid, tpath)
         tid = active(sid)
         if not start or d.get("agent_id"):
             return  # only a session start of the main agent prints anything
@@ -1126,9 +1181,19 @@ def cmd_hook(a):
                 print(printable(f"Thread {lost} was closed or removed by another session, so this session is no "
                                 f"longer captured. Continue it (`thread open {lost}`, or `thread reopen {lost}` "
                                 f"when it is closed) only if you are asked to."))
-            norm = lambda path: os.path.normcase(os.path.realpath(path)).rstrip(os.sep)
+            # One folder has more than one spelling where the file system ignores letter case and
+            # Unicode form (macOS, Windows): the strings are compared folded there, and a folder that
+            # exists also by what it is on disk (as os.path.samefile does), one stat per thread.
+            real = os.path.realpath(d.get("cwd") or os.getcwd())
+            fold = (lambda p: unicodedata.normalize("NFC", unicodedata.normalize("NFC", p).casefold())) \
+                if folds_case(real) else (lambda p: p)
+            norm = lambda path: fold(os.path.normcase(os.path.realpath(path))).rstrip(os.sep)
             is_root = lambda path: os.path.dirname(path + os.sep) == path + os.sep  # "" is "/"
-            here, near = norm(d.get("cwd") or os.getcwd()), []
+            here, near, above = norm(real), [], set()  # above: this folder and the ones it is in
+            while os.path.dirname(real) != real:
+                above.add(file_id(real))
+                real = os.path.dirname(real)
+            above.discard(None)
             for t in all_ids():
                 try:
                     m = meta(t)
@@ -1137,7 +1202,8 @@ def cmd_hook(a):
                     # after the shell moved into a subfolder). A root folder on either side would
                     # match everything, so it matches nothing.
                     if m["status"] == "open" and c is not None and not is_root(c) and not is_root(here) and \
-                            (here == c or here.startswith(c + os.sep) or c.startswith(here + os.sep)):
+                            (here == c or here.startswith(c + os.sep) or c.startswith(here + os.sep)
+                             or file_id(m["cwd"]) in above):
                         near.append((activity(t), t))
                 except (OSError, ValueError, KeyError, TypeError):
                     pass

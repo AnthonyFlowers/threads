@@ -30,8 +30,12 @@ The short version is in the [README](../README.md#what-it-does-not-capture).
   another thread or detached by then, or for what that session did after the thread was closed
   (`thread reopen` recovers nothing); that work is then not in the log, and nothing says so. A session still running on the same thread is captured early
   by the same step, which is harmless. After `thread close`, the rest of the closing turn is not captured.
-- If Claude Code replaces a transcript file with a shorter one, the file is captured again from its
-  start (duplicate entries); if it rewrites it at the same or greater length, new lines can be missed.
+- If Claude Code replaces a transcript file with a shorter one, or with one whose first line is
+  another (a new file at the same path, of any length), the file is captured again from its start
+  (duplicate entries when lines of the old file are in it again). The first line's length and
+  checksum are kept with the offset in the session's state for this. A file rewritten at the same
+  or greater length with the same first line is read from the old offset: changed lines before it
+  are missed.
 - Commands and hooks of one session capture one at a time, through a lock file. A lock older than
   5 seconds is taken to be left by a process that died and is removed, so a command waits at most
   that long. `thread checkpoint` and `thread close` of one thread also run one at a time, through
@@ -112,7 +116,10 @@ The short version is in the [README](../README.md#what-it-does-not-capture).
   checkpoint. The repository can change outside the thread, so verify them (`git log`) on resume.
 - The session-start line lists an open thread when the session's folder and the folder the thread
   was created in are the same or one is inside the other, at most 8, most recent log activity
-  first. A session started in a root folder, and a thread created in one, get no line. A session
+  first. Where the file system ignores letter case and Unicode form (macOS, Windows), another
+  spelling of a folder is the same folder; a folder that exists is also matched by what it is on
+  disk. A thread whose folder was moved or is on another machine is not matched.
+  A session started in a root folder, and a thread created in one, get no line. A session
   started in a high folder (the home folder) is told about every thread below it.
 - Files edited by hand: when `summary.md` is gone, `thread open`, `thread export` and the text after a
   compaction print the last checkpoint entry of the log instead, under a line that says so; bytes in it
@@ -121,11 +128,16 @@ The short version is in the [README](../README.md#what-it-does-not-capture).
   not a number counts as 0, and `thread close` says so.
 - `thread list` shows the date and time (to the minute) of the last log activity in UTC, as the
   log and `meta.json` do; they can differ from the local date and time.
-- `thread grep` stops a search after 3 s, with a message that says to simplify the pattern: a
-  pattern with a repeat inside a repeat can otherwise run without end. A second small Python
+- `thread grep` stops a search after 3 s: a pattern with a repeat inside a repeat can otherwise
+  run without end. The 3 s cover the whole search, so several hundred MB of logs (`--all`) reach
+  them with a plain pattern too. The message names the cause: `stuck on the pattern: simplify it
+  ...` when the search made no progress through the log lines in the last 1.5 s, else `still
+  reading through very large logs: narrow it with `-t <id>` (not `--all`) or `--type <types>`
+  ...`. Progress is counted every 4096 lines, so a pattern that is slow on every line, or one log
+  file that takes more than 1.5 s to read, can get the other message. A second small Python
   process watches the time (the regex engine cannot be interrupted from inside the process on
   Windows), so each `thread grep` starts one. On a machine where it cannot be started, the search
-  has no time bound. A search of several hundred MB of logs can reach the 3 s too: narrow it with `-t`.
+  has no time bound.
 - Text on stdin (`note`, `checkpoint`, `close`) is read as UTF-8 or, by its byte-order mark or NUL
   bytes, as UTF-16; NUL characters are never stored. Bytes of another encoding (cp1252) that are not
   valid UTF-8 become `�` (U+FFFD). UTF-16 without a mark is taken as little-endian or big-endian by
@@ -145,6 +157,9 @@ The short version is in the [README](../README.md#what-it-does-not-capture).
 - Lines in a transcript that carry another session's id are not captured.
   A hook's `transcript_path` is used only when the file is named `<session id>.jsonl` or holds a line
   of that session; otherwise the session's own file is looked up as when no path is given.
+  A subagent's own transcript (a file in a `subagents` folder, or any file not named `<session
+  id>.jsonl` given by a hook that carries an `agent_id`) is never used: its lines carry the
+  session's id, but its length is not the session's offset.
 - When one session closes or removes a thread, another session bound to it is detached at its next
   capture. Its next `thread` command that uses the active thread fails once with `thread <id> was
   closed or removed by another session, ...`, also when a hook ran in between; after that the

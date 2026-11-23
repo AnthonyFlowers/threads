@@ -1346,9 +1346,95 @@ class Case(unittest.TestCase):
                      "__import__('os').path.dirname(sys.argv[0])); import thread; thread.GREP_SECONDS = 0.5; thread.main()")
         self.assertLess(time.time() - t, 30)
         self.assertNotEqual(r.returncode, 0)
-        self.assertEqual(r.stderr.decode().strip(), "thread: the pattern took longer than 0.5 s and was stopped: "
+        self.assertEqual(r.stderr.decode().strip(), "thread: the search was stopped after 0.5 s, stuck on the pattern: "
                          "simplify it (a repeat inside a repeat, like `(a+)+`, is the usual cause)")
         self.assertIn("[matches 1-1 of 1]", self.run_cli("grep", "a+!$"))  # an ordinary search is not stopped
+        # a search that still moves through the lines at the deadline: the logs are the cause, not one line
+        self.run_cli("new", "B")
+        self.run_cli("note", "\n".join(["a" * 18 + "!"] * 400))
+        r = self.cli("grep", "(a+)+$", code="import sys; sys.argv = sys.argv[1:]; sys.path.insert(0, "
+                     "__import__('os').path.dirname(sys.argv[0])); import thread; thread.GREP_SECONDS = 0.5; "
+                     "thread.GREP_TICK = 1; thread.main()")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(r.stderr.decode().strip(), "thread: the search was stopped after 0.5 s, still reading through "
+                         "very large logs: narrow it with `-t <id>` (not `--all`) or `--type <types>`; if the pattern "
+                         "is slow on every line, simplify it")
+
+    # ---- field-test findings 43-46 ----
+
+    def test_session_start_hint_with_another_spelling_of_the_folder(self):
+        import unicodedata
+        work = Path(self.tmp.name).resolve() / "work" / "My Caf\u00e9"
+        (work / "sub").mkdir(parents=True)
+        self.addCleanup(os.chdir, os.getcwd())
+        os.chdir(work)
+        self.run_cli("new", "A")
+        self.as_session("sess-2")
+        start = lambda cwd: self.hook("SessionStart", source="startup", cwd=cwd)
+        typed = [str(work).replace("My Caf", "my caf"), unicodedata.normalize("NFD", str(work)),
+                 os.path.join(str(work).replace("My Caf", "MY CAF"), "sub"), str(work.parent).upper()]
+        folds = thread.folds_case
+        self.addCleanup(setattr, thread, "folds_case", folds)
+        thread.folds_case = lambda path: True  # as on macOS and Windows, whatever this machine has
+        for cwd in typed:
+            self.assertIn("Open threads for this folder: a.", start(cwd), cwd)
+        self.assertEqual(start(str(work) + "x"), "")
+        thread.folds_case = lambda path: False
+        if not folds(str(work)):  # a file system that keeps them apart: these are other folders
+            for cwd in typed:
+                self.assertEqual(start(cwd), "", cwd)
+        self.assertIn("Open threads for this folder: a.", start(str(work)))
+
+    def test_replaced_transcript_that_grew_past_the_offset_is_read_from_its_start(self):
+        self.run_cli("new", "A")
+        self.say(msg("user", "OLD0"), msg("user", "OLD1"))
+        self.hook()
+        self.say(msg("user", "OLD2"))
+        self.hook()
+        self.assertEqual([self.log("a").count(f"OLD{i}") for i in range(3)], [1, 1, 1])  # same file: no line twice
+        self.transcript.write_text("")  # a new file at the same path, longer than the old one by the next hook
+        self.say(*(msg("user", f"NEW{i}") for i in range(5)))
+        self.hook()
+        self.say(msg("user", "NEW5"))
+        self.hook()
+        self.assertEqual([self.log("a").count(f"NEW{i}") for i in range(6)], [1] * 6)
+        # a state from before the first line was stored is trusted as it was
+        st = thread.state(SID)
+        del st["head"]
+        thread.write(thread.state_path(SID), json.dumps(st))
+        self.say(msg("user", "NEW6"))
+        self.hook()
+        self.assertEqual([self.log("a").count(f"NEW{i}") for i in range(7)], [1] * 7)
+
+    def test_subagent_transcript_never_sets_the_session_offset(self):
+        self.run_cli("new", "A")
+        self.say(*(msg("user", f"P{i}") for i in range(4)))
+        self.hook()
+        sub = self.transcript.parent / SID / "subagents" / "agent-abc.jsonl"
+        sub.parent.mkdir(parents=True)
+        other = self.transcript.with_name("agent-elsewhere.jsonl")  # a name that says nothing
+        n = 4
+        for size in (2, 7):  # shorter than the session's file, then a little longer
+            for path, more in ((sub, {"agent_id": "abc"}), (sub, {}), (other, {"agent_id": "abc"})):
+                path.write_text("".join(msg("user", f"SUB{i}", isSidechain=True) for i in range(size)))
+                self.run_cli("hook", stdin=json.dumps({"session_id": SID, "transcript_path": str(path),
+                                                       "hook_event_name": "PreCompact", **more}))
+                self.assertEqual(thread.state(SID)["offset"], n, (size, path.name, more))
+                self.say(msg("user", f"P{n}"))
+                self.hook(agent_id="abc")  # a subagent's hook with the session's own file captures as before
+                n += 1
+        log = self.log("a")
+        self.assertEqual([log.count(f"P{i}\n") for i in range(n)], [1] * n)
+        self.assertNotIn("SUB", log)
+        self.assertFalse((thread.home() / "errors.log").exists())
+
+    def test_recovery_line_names_a_shorter_page_when_the_entries_are_many(self):
+        self.run_cli("new", "A")
+        self.say(*(msg("user", f"tail {i}") for i in range(11)))
+        self.as_session("sess-2")
+        out = self.run_cli("open", "a")
+        self.assertIn("see them with `thread show --from 3 11` (add `--type assistant,tool_use` for a shorter page)\n", out)
+        self.assertEqual(out.splitlines()[0].count("recovered 11 transcript lines"), 1)  # still one line
 
     def test_utf16_stdin_is_stored_as_text(self):
         self.run_cli("new", "A")
