@@ -162,7 +162,7 @@ The owner restarted the test at 12:16Z with the unused part of the six hours (32
 |---|---|---|---|---|
 | 17 | A7 | The log writes tool input as `key: value` lines; a multi-line value (a heredoc) with a line `x: y` looks like a new key, so every reader of the log must guess. | design limit of the log format | logged; owner (a format change touches every reader) |
 
-**B6 milestone (12:27Z).** Guide 4 (personal identity) done in thread `personal-identity-guide`, closed: vault 16a3f79 pushed (this commit was allowed; guide 3's was refused), artifact [link removed]. Still uncommitted: the guide-3 note and `journal/2026-11-23.md`. It created thread `frege-sense-reference-guide` with a full first checkpoint and then stopped by itself "so a fresh session can do a cold pickup": it was never told about restarts, so it inferred the purpose of the test from the report questions (its later behaviour counts as *influenced*).
+**B6 milestone (12:27Z).** Guide 4 (personal identity) done in thread `personal-identity-guide`, closed: vault 16a3f79 pushed (this commit was allowed; guide 3's was refused), artifact [link removed]. Still uncommitted: the guide-3 note and a vault file. It created thread `frege-sense-reference-guide` with a full first checkpoint and then stopped by itself "so a fresh session can do a cold pickup": it was never told about restarts, so it inferred the purpose of the test from the report questions (its later behaviour counts as *influenced*).
 
 **Fix stop 3 (findings 15, 16; 12:27Z to 12:30Z).** A7 interrupted in piece 3; B6 (idle, had stopped by itself) archived. One Fable subagent, reviewed by the coordinator; threads main 5cb9dfa (local), 34 tests on Python 3.14 and 3.9.
 - 15: the clip hint is `thread show -t <id> N` whenever the thread is not the caller's active one (`grep -t`, `grep --all`, closed thread, nothing bound).
@@ -179,7 +179,7 @@ The owner restarted the test at 12:16Z with the unused part of the six hours (32
 
 **A8 first report (12:33Z).** New thread `thread-e2e-scenarios`. History by `thread grep --all --count` (counts only, so no other thread's text and no secret copied) and two per-thread greps of checkpoints, all first try; enough. Friction, minor: `--all --count` counts the current thread too (20 of 24 hits were its own brief) and there is no way to leave it out (logged as a wish).
 
-**B7 milestone (12:36Z).** Guide 5 note written (`frege-sense-reference-study-guide.md`, claim table; Frege's primary text unreachable, two items marked as from memory). Next: artifact, journal, commit, close. Friction: none.
+**B7 milestone (12:36Z).** Guide 5 note written (claim table; Frege's primary text unreachable, two items marked as from memory). Next: artifact, journal, commit, close. Friction: none.
 
 **Owner question (12:36Z).** Compress threads but keep them searchable (`~/.threads` is 2.3 MB, 15 threads): options given to the owner are APFS transparent compression for closed threads (no code change) or gzip on `thread close` with readers that open both forms. Coordinator's advice: not yet. Awaiting the owner's choice.
 
@@ -191,7 +191,7 @@ The owner restarted the test at 12:16Z with the unused part of the six hours (32
 
 **A8 report 3 (12:39Z).** Scenarios 5 and 6 committed (dbbc70a compaction mid-turn: nothing lost or doubled; 5ef767f every printed `thread show` hint, run as printed, shows its entry, for grep active / `-t` / `--all` / closed / no session id, open, digest and catchup). No thread.py defect; the fix for finding 15 holds. Checkpointed after scenario 6. Next: 7 and 8.
 
-**B7 milestone (12:40Z).** Guide 5 (Frege, sense and reference) done: vault ea6d301 pushed (the note only), artifact [link removed], thread `frege-sense-reference-guide` closed. No log search needed. Still uncommitted in the vault: `journal/2026-11-23.md` (entries for guides 3 to 5) and the guide-3 note. Next: guide 6 in a new thread. Friction: none.
+**B7 milestone (12:40Z).** Guide 5 (Frege, sense and reference) done: vault ea6d301 pushed (the note only), artifact [link removed], thread `frege-sense-reference-guide` closed. No log search needed. Still uncommitted in the vault: a vault file (entries for guides 3 to 5) and the guide-3 note. Next: guide 6 in a new thread. Friction: none.
 
 **B7 (12:40Z).** Guide 6 (the problem of induction) started in new thread `induction-guide`; rules carried into the first checkpoint.
 
@@ -345,3 +345,228 @@ A11 archived at 14:07Z; A12 = fresh [session id] ("Continue the end-to-end scena
 |---|---|---|---|---|
 | 34 | A12 (e2e s26) | `save_meta()` writes to the folder named by the `id` inside `meta.json`: closing a thread whose folder was renamed by hand leaves it open and creates a closed ghost folder. | defect (hand rename) | fix stop 8 |
 | 35 | A12 (e2e s26) | A non-number `closes` in `meta.json` makes `thread close` crash with a traceback after the checkpoint is already logged. | defect (hand edit) | fix stop 8 |
+
+**Fix stop 8 (findings 31 to 35; 14:28Z to 14:37Z).** A12 interrupted while committing scenario 29, B10 interrupted in guide 13; both archived afterwards. One Fable subagent (in the background this time), reviewed by the coordinator; 51 tests on Python 3.14 and 3.9.
+- 31: the recovery line names log lines: `... they are log lines A-B, after later entries: see them with thread show --from A K`; new `thread show --from LINE [N]` (at most 30 entries). Exact when more is appended after the tail and when two tails are recovered.
+- 32: with `summary.md` gone, open, export and the compaction text print the last checkpoint entry of the log under a line that says so. 33: `summary.md` is read leniently. 34: meta is written to the folder it was read from. 35: a damaged `closes` counts as 0; no damaged meta field gives a traceback.
+- Skill wording: `thread new` also captures what the session read from other threads before.
+- Installed in the workshop (local). `companion-skill` rebased before the restart.
+
+**Publication (owner's instruction, 14:24Z).** The owner asked for an updated README and a public repo: push main, Apache-2.0, this log kept but scrubbed (session ids, artifact links, private vault file names), README to say that the tool was mostly developed by AI agents. The one unpushed commit that held session ids was dropped from local history before the push.
+
+**14:37Z restart.** A13 and B11: fresh Opus 5.5 sessions, restart prompts only (plus "do not wait for a go-ahead").
+
+**A13 first report (14:38Z).** Found the thread from the session-start line; the recovery line and two `thread show --from` calls showed scenario 28 committed and scenario 29 written with its commit interrupted; `git status` confirmed. Friction: 44 recovered entries needed two calls (30-entry cap) and 26 of 30 were clipped, so the page said little beyond the assistant lines; it suggests a recovered-tail view limited to assistant and tool_use entries (a `--type` filter on `thread show`). One more open defect from scenario 28 (parallel closes), not yet described.
+
+**B11 first report (14:38Z).** Cold pickup from closed threads: `thread list --all`, `thread grep --all --count`, one grep `--oldest` and one `thread show -t`, all first try. Guide 13: Kuhn. Same note as B9 and B10 on the stale report target in the oldest thread (finding 29).
+
+**14:39Z: published.** threads main pushed (4de4daa) and the repository switched to public (Apache-2.0).
+
+**B11 milestone (14:47Z).** Guide 13 (Kuhn, paradigms and scientific revolutions) done in new thread `kuhn-paradigms-guide`, closed: vault 31e4af3 pushed (the note only), artifact [link removed]. Nothing needed from the log. It noticed the back-capture at `thread new` and found it documented now. Next: guide 14 (Searle's Chinese room). Friction: none in the thread CLI.
+
+**B11 milestone (14:52Z).** Guide 14 (Searle's Chinese room) done in new thread `chinese-room-guide`, closed: vault c689d55 pushed (the note only), artifact [link removed]. Next: guide 15 (Nozick's experience machine). Friction: none.
+
+**B11 milestone (14:56Z).** Guide 15 (Nozick's experience machine) done in new thread `experience-machine-guide`, closed: vault b5fea77 pushed (the note only), artifact [link removed]. Next: guide 16 (Sartre's bad faith). Friction: none.
+
+**A13 report 19 (14:57Z).** The full suite showed the rebase onto the fix-stop-8 commit (7 failures, 4 unexpected successes); `git log -- thread.py` explained it, first try. Tests brought in line (the five defects of fix stop 8 confirmed fixed; one of its own scenario-24 setups was wrong), then scenarios 29 (block types), 30 (detach: no leak through hooks, recovery, re-open or new) and 31 (resume after a close elsewhere). Suite green with three expected failures on both Pythons. Stale repo facts in the summary: ninth mention (finding 21).
+
+| # | From | Finding | Class | Resolution |
+|---|---|---|---|---|
+| 36 | A12/A13 (e2e s28) | Parallel closes of one thread (details in the scenario-28 expected failure). | defect, rare | fix stop 9 |
+| 37 | A13 (e2e s31) | When a session is resumed after its thread was closed by another session, the session-start hook prints nothing, so the resumed agent goes on working uncaptured with no sign (the "closed or removed" message waits for the next thread command). | defect | fix stop 9 |
+
+**B11 milestone (15:00Z).** Guide 16 (Sartre's bad faith) done in new thread `sartre-bad-faith-guide`, closed: vault d8869a2 pushed (the note only), artifact [link removed]. Next: guide 17 (Benacerraf's dilemma). Friction: none.
+
+**B11 milestone (15:04Z).** Guide 17 (Benacerraf's dilemmas) done in new thread `benacerraf-dilemma-guide`, closed: vault dff5c72 pushed (the note only), artifact [link removed]. Next: guide 18 (Zhuangzi's butterfly dream). Friction: none.
+
+**B11 milestone (15:07Z).** Guide 18 (Zhuangzi's butterfly dream) done in new thread `zhuangzi-butterfly-guide`, closed: vault 0e5c5f6 pushed (the note only), artifact [link removed]. Next: guide 19 (Molyneux's problem). Friction: none.
+
+**Fix stop 9 (findings 36, 37; 15:07Z to 15:13Z).** A13 interrupted in its scenario 33 (uncommitted work kept), B11 interrupted in guide 19. One Fable subagent, reviewed by the coordinator; threads main d64f4c8, pushed (the repo is public now); 54 tests on Python 3.14 and 3.9.
+- 36: checkpoint and close hold a per-thread lock; of two closes at the same moment exactly one wins, the other gets "thread <id> is closed; only notes can be added".
+- 37: the session-start hook says when the session's thread was closed or removed by another session (on resume, compaction and startup); the next thread command still says it once.
+- Wish from A13: `thread show --last N` and `--from LINE [N]` take `--type`, so a recovered tail can be read without the long tool results.
+- Not covered: a reopen racing a close is still last-writer-wins (in LIMITS.md).
+- Installed in the workshop (local). `companion-skill` rebased with autostash before the restart.
+
+**15:13Z restart.** A13 and B11 resumed in place ("Continue.").
+
+**B11 milestone (15:17Z).** Guide 19 (Molyneux's problem) done in new thread `molyneux-problem-guide`, closed: vault bbde6e8 pushed (the note only), artifact [link removed]. Next: guide 20 (Plato's Ring of Gyges). Friction: none.
+
+**A13 report 20 (15:20Z).** After the interrupt it checked `git status` and `git log` rather than the thread, saw the rebase onto the fix-stop-9 commit, and brought scenarios 28 and 31 in line (both defects confirmed fixed). New scenarios 32 (grep patterns an agent writes) and 33 (Windows stdin): 19c63f2, c20aa17. Suite green with three expected failures on both Pythons.
+
+| # | From | Finding | Class | Resolution |
+|---|---|---|---|---|
+| 38 | A13 (e2e s32) | `thread grep` has no time bound: a pattern with nested repetition (`(a+)+$` against a line of 32 `a`) never returns. | defect (an agent-written regex can hang a turn) | fix stop 10 |
+| 39 | A13 (e2e s33) | UTF-16 text on stdin (Windows PowerShell) is stored with NUL bytes; grep finds none of its words and `open` hides it. | defect (Windows) | fix stop 10 |
+| 40 | A13 | `thread grep -x` (a pattern that starts with `-`) says "arguments are required: pattern" with no hint to put `--` first; cp1252 stdin silently becomes U+FFFD (the README mentions only `?`). | unclear message, docs gap | fix stop 10 |
+
+**B11 milestone (15:24Z): first compaction in the test.** Guide 20 (Plato's Ring of Gyges) done, thread `ring-of-gyges-guide` closed: vault 6706ec6 pushed (the note only), artifact [link removed]. The session's context was compacted during this guide: the hook re-injected the thread's summary and said 11 entries were newer than the checkpoint, and the session checkpointed again before going on. Next: guide 21 (Wittgenstein's private language argument).
+- What compaction cost: the exact payload shape of a docs-tool call that had worked before. The session relearned it from the tool's refusal message and reported that "the thread log held it only in summarised form". Checked by the coordinator: this thread's log holds 11 such calls whole, but all from after the compaction; the calls from before it are in the logs of the earlier guides' threads (one thread per guide). The detail was recoverable with `thread grep --all`, and the session did not think of that. This is finding 29 from another side: a series of threads splits the history, and the post-compaction reminder says "grep" without saying that earlier threads of the same work may hold the detail.
+
+**B11 milestone (15:29Z).** Guide 21 (Wittgenstein's private language argument) done in new thread `private-language-guide`, closed: vault 8cdd23b pushed (the note only), artifact [link removed]. It put the docs payload shape into the new thread's first checkpoint (its own remedy for what compaction cost), and used `thread grep -t <id> --oldest --max 1 --type checkpoint` on five closed threads to correct start times it had guessed for the journal. Friction, minor: `thread list` shows only a date, not a time; a thread's start time takes a grep (or `meta.json`). Next: guide 22.
+
+**A13 report 21 (15:33Z).** Scenarios 34 (header spoof) and 35 (closed pipe) committed: ad2bf87, 6ff9b14. Suite green with six expected failures on both Pythons.
+
+| # | From | Finding | Class | Resolution |
+|---|---|---|---|---|
+| 41 | A13 (e2e s34) | A tool-result line written in the printed header form (`<id>:<n>  === ... note ===`) looks exactly like a real entry header in `thread show` output (the parser is not fooled, the reader can be). | defect (captured text can imitate the tool's own output) | fix stop 10 |
+| 42 | A13 (e2e s35) | `thread open x | head`: when the output is longer than the pipe buffer, the command dies with BrokenPipeError before it binds, so the session stays unbound although the agent saw the summary. grep, show and export print tracebacks on a closed pipe. | defect (agents often pipe to `head`) | fix stop 10, started at once |
+
+**Fix stop 10 (findings 38 to 42; 15:33Z to 15:42Z).** A13 interrupted in its scenario 36, B11 interrupted in guide 22; both archived afterwards. One Fable subagent, reviewed by the coordinator (tests on both Pythons and a smoke run in a temporary home); threads main d3fd733, pushed; 59 tests.
+- 42: every command does its state changes first and writes its output at the end; a closed pipe ends it quietly, so `thread open x | head` binds.
+- 38: `thread grep` is stopped after 3 s by a small watchdog process (measured: `(a+)+$` stopped at 3.05 s) with a message to simplify the pattern. Cost: one more Python start per grep; a legitimate search over several hundred MB would also be stopped.
+- 39: UTF-16 stdin is decoded and NULs are never stored. 40: the grep usage error names `thread grep -- -x`.
+- 41: in `thread show` and the open view the header is in column one and every body line is indented two spaces, so captured text cannot imitate a header.
+- Wording: the post-compaction text says that earlier threads of the same work hold their own details (`thread grep --all`). `thread list` shows date and time.
+- Installed in the workshop (local). `companion-skill` rebased before the restart; its suite is red on purpose again (five expected failures now pass; a few tests and the companion scripts' own tests assert the old `show` and `list` formats).
+
+**15:42Z restart.** A14 and B12: fresh Opus 5.5 sessions, restart prompts only. Cost note: B11 ran for an hour through one compaction and nine guides and cost about 26 USD; the other sessions cost 3 to 9 USD each.
+
+**B12 first report (15:43Z).** Found `is-ought-guide` (guide 22) from the session-start line. `thread open` recovered 19 lines and its `thread show --from 518 19` command worked first try: it showed that the previous session was stopped during the diagram screenshot, with the note written and the artifact up. Friction: the page clipped 15 of 19 entries, so three more `thread show N` calls were needed (the recovery hint could suggest `--type assistant,tool_use`, which now exists).
+
+**B12 milestone (15:45Z).** Guide 22 (Hume's is-ought gap) finished from the interrupted state (three pending artifact sections filled, diagram checked), thread `is-ought-guide` closed; artifact [link removed]. **Vault commit + push refused by the auto-mode classifier** (second time, as for guide 3): the guide-22 note is uncommitted, for the owner. Next: guide 23 (McTaggart on time). Friction: none in the thread tool.
+
+**B12 milestone (15:50Z).** Guide 23 (McTaggart, the unreality of time) done in new thread `mctaggart-time-guide`, closed: vault bc45d2a pushed (the note only), artifact [link removed]. The guide-22 note is still uncommitted. One small gap in a checkpoint (a helper script's argument order) cost one failed call; it added the fact to the closing summary. Next: guide 24. Friction: none in the thread tool.
+
+**B12 milestone (15:54Z).** Guide 24 (the liar paradox) done in new thread `liar-paradox-guide`, closed: vault c8d38cc pushed (the note only), artifact [link removed]. The fact added to the previous closing summary (script argument order) was used first try. Next: guide 25. Friction: none.
+
+**A14 first report (15:56Z).** Found the thread from the session-start line; `thread open` recovered the interrupted session's 6 lines; `thread show 18133`, `thread show --from 18135 6` and one grep, all first try, showed which reports had been sent and that scenarios 36 and 37 were next (the summary itself lagged: it was written before the last two reports). `git log -- thread.py` showed the fix-stop-10 commit; it brought the suite in line (7d71e3f): the five defects of fix stop 10 are confirmed fixed, one expected failure left (finding 30, the owner's). Green on both Pythons.
+
+**B12 milestone (15:57Z).** Guide 25 (Newcomb's problem) done in new thread `newcomb-problem-guide`, closed: vault 1e644a6 pushed (the note only), artifact [link removed]. Next: guide 26. Friction: none.
+
+**B12 milestone (16:01Z).** Guide 26 (the problem of evil) done in new thread `problem-of-evil-guide`, closed: vault 9b7523f pushed (the note only), artifact [link removed]. Next: guide 27. Friction: none.
+
+**A14 report 23 (16:03Z).** Scenarios 36 and 37 committed (ab1e82f, 7936cb7), no new defect: with 300 open threads the session-start line stays one line (8 names and "293 more"), the hook takes 0.05 s, list 0.04 s, `grep --all` 0.14 s; 6 parallel `thread new` with one title get 6 ids. Suite green with one expected failure on both Pythons.
+
+| # | From | Finding | Class | Resolution |
+|---|---|---|---|---|
+| 43 | A14 (measured, no test) | The 3 s grep bound of fix stop 10 covers the whole search: grep reads about 110 MB/s, so at about 330 MB of logs (`--all`) a plain pattern is stopped with a message that blames the pattern. Also `thread list` has no page bound. | limit of fix 38 with a misleading message (far from today's 5 MB) | next fix stop: the message names both causes and `-t`; or the bound is per line |
+
+**B12 milestone (16:07Z).** Guide 27 (Singer, "Famine, Affluence, and Morality") done in new thread `singer-famine-guide`, closed: vault b75c7cd pushed (the note only), artifact [link removed]. Next: guide 28. Friction: none in the thread tool.
+
+**A14 report 24 (16:09Z).** Scenarios 38 (transcript recreated while bound) and 39 (names with spaces and non-ASCII: work end to end) committed: e197cb8, d2581ad. Suite green with three expected failures on both Pythons.
+
+| # | From | Finding | Class | Resolution |
+|---|---|---|---|---|
+| 44 | A14 (e2e s39) | The session-start line compares folder paths as strings: the same folder spelled in another letter case or Unicode form (possible on macOS) gets no hint. Matters only if Claude Code passes the typed spelling (not verified). | defect, narrow | fix stop 11 |
+| 45 | A14 (e2e s38) | A transcript file that is replaced and grows past the old offset before the next hook loses its first lines silently (a documented limit; the inode or the first line would show the swap). | documented limit with a cheap check | fix stop 11 |
+
+**B12 milestone (16:11Z).** Guide 28 (brains in a vat) done in new thread `brain-in-vat-guide`, closed: vault 011550a pushed (the note only), artifact [link removed]. Friction: none in the thread tool.
+
+**A14 report 25 (16:15Z).** Scenarios 40 (symlinked project folder: no defect) and 41 (subagent transcripts) committed: c637ed7, 34c849c. Suite green with five expected failures on both Pythons.
+
+| # | From | Finding | Class | Resolution |
+|---|---|---|---|---|
+| 46 | A14 (e2e s41) | A hook that carries an `agent_id` and the subagent's own transcript file passes the "own transcript" check of fix stop 7 (its lines carry the parent's session id), and its length replaces the parent's offset: the next capture repeats or skips lines. Whether Claude Code sends that path is not verified. | defect, if the input occurs | fix stop 11 |
+
+**Fix stop 11 (findings 43 to 46; 16:15Z to 16:21Z).** A14 interrupted after scenario 41, B12 interrupted in guide 29. One Fable subagent, reviewed by the coordinator; threads main 622980d, pushed; 63 tests on Python 3.14 and 3.9.
+- 43: the grep stop message tells "stuck on the pattern" from "still reading through very large logs" (by whether lines were still being read) and names the remedy for each.
+- 44: the session-start line matches folders by file identity as well as by spelling (letter case and Unicode form no longer matter); still fast with 300 threads.
+- 45: the first line of the transcript is fingerprinted with the offset; a replaced file is captured from its start.
+- 46: a file in a `subagents` folder never counts as the session's own transcript, and a hook with an `agent_id` cannot set the parent's offset.
+- The recovery line suggests `--type assistant,tool_use` when more than 10 entries were recovered.
+- Installed in the workshop (local). `companion-skill` rebased before the restart.
+
+**16:21Z restart.** A14 and B12 resumed in place ("Continue.").
+
+**B12 (16:22Z).** After the resume it started guide 29 (Quine, the indeterminacy of translation) in new thread `quine-gavagai-guide`. Friction: none.
+
+**B12 milestone (16:25Z).** Guide 29 (Quine, the indeterminacy of translation) done, thread `quine-gavagai-guide` closed: vault 4e3bd45 pushed (the note only), artifact [link removed]. Friction: none in the thread tool.
+
+**A14 report 26 (16:34Z).** Saw the rebase onto the fix-stop-11 commit by the rule it had put in its own summary ("check `git log -3 -- thread.py`"); findings 44 to 46 confirmed fixed (7d80cc4). Scenario 42 (a 2 MB tool result: stored uncut, clipped in grep/open, whole in `thread show <line>`; a turn-end hook with nothing new reads a 200 MB transcript in 0.10 s): no defect. Scenario 43 (the clock going back): one defect. Suite green with three expected failures on both Pythons.
+
+| # | From | Finding | Class | Resolution |
+|---|---|---|---|---|
+| 47 | A14 (e2e s43) | A `.lock` file dated in the future (the clock stepped back after a killed holder, or `THREADS_HOME` copied from a machine whose clock is ahead) never counts as stale, so every hook and checkpoint waits until the clock catches up. | defect, rare | next fix stop (age taken as an absolute value) |
+
+**Fix stop 12 (finding 47; 16:54Z to 16:55Z).** Both sessions had ended their turns by themselves after their last reports (A14 at 16:34Z, B12 at 16:25Z), so about 25 minutes of test time were idle on each track: the "do not wait" line of the prompt did not prevent it. One Fable subagent; threads main 72285c7, pushed; 64 tests on both Pythons: a lock whose age is outside the stale window in either direction counts as stale. No skill change. `companion-skill` rebased.
+
+**16:55Z restart.** A15 and B13: fresh Opus 5.5 sessions (restart prompts, plus "do not end your turn after a report"). The last stop is the end of the test at 17:44Z.
+
+**B13 first report (16:56Z).** Cold pickup with 29 closed guide threads: `thread list --all`, `thread grep --all --count`, `thread export` of the newest one, then one grep `--oldest` and `thread show -t <id> 3` for the rules, first try. Next: guide 30 (the Euthyphro dilemma).
+
+| # | From | Finding | Class | Resolution |
+|---|---|---|---|---|
+| 48 | B13 (seen by B9 to B12 as an extra grep each time) | A closed thread shows only its closing summary, and the skill's closing template has no place for standing rules, so rules written in the first checkpoint are invisible in the summary and the export of a closed thread; each fresh session needs a grep and a `thread show` to get them. | unclear instruction (skill template) | open at the end of the test: add "standing rules (or where they are)" to the closing template |
+
+**A15 first report (17:02Z).** Found the thread from the session-start line; summary enough; `git log -3 -- thread.py` showed the fix-stop-12 commit; finding 47 confirmed fixed (dc96c17). Suite green with one expected failure (finding 30) on both Pythons. Third fresh session of three to try `thread show <thread-id>` first (finding 20): the error message was enough each time, but the guess is natural; an alias (show with an id = the read-only open view) would remove the miss. Stale commit ids after the rebase again (finding 21).
+
+**B13 milestone (17:02Z).** Guide 30 (the Euthyphro dilemma) done in new thread `euthyphro-dilemma-guide`, closed: vault f523e55 pushed (the note only), artifact [link removed]. Its closing summary now repeats the standing rules (its own remedy for finding 48). Next: guide 31. Friction: the back-capture at `thread new` (documented; expected).
+
+**B13 milestone (17:05Z).** Guide 31 (moral luck) done in new thread `moral-luck-guide`, closed: vault 4526e15 pushed (the note only), artifact [link removed]. The rules came straight from the previous closing summary (the remedy for finding 48 worked). It caught a wrong carried fact with `git status`: "guides 1 to 21 committed" had been copied forward through nine or more threads although guide 3 was never committed; `thread export trolley-problem-guide` confirmed it, first try.
+
+| # | From | Finding | Class | Resolution |
+|---|---|---|---|---|
+| 49 | B13 | A wrong fact in a checkpoint is copied forward from thread to thread in a series; the skill's "verify recorded repo facts" step covers a thread that is opened, not a new thread seeded from its predecessor's summary. | unclear instruction (skill wording) | open at the end of the test |
+
+**B13 milestone (17:09Z).** Guide 32 (Hempel's raven paradox) done in new thread `raven-paradox-guide`, closed: vault 53758cd pushed (the note only), artifact [link removed]. The seed summary was checked against `git status` before use. Next: guide 33. Friction: none new.
+
+**A15 report 28 (17:12Z).** Scenarios 44 (read-only and full disk) and 45 (a bound and an unbound session in one folder: the unbound one writes nothing) committed: 526f650, 0c05e8f. Suite green with two expected failures on both Pythons.
+
+| # | From | Finding | Class | Resolution |
+|---|---|---|---|---|
+| 50 | A15 (e2e s44) | When the disk fills in the middle of an entry, the cut entry stays in the log, the offset does not advance, and the next capture appends the whole turn again: the turn is in the log twice (the first copy cut). | defect, rare (nothing is lost) | open at the end of the test |
+| 51 | A15 (e2e s44) | `thread note` and `thread checkpoint` on a log that cannot be written print a Python traceback, not a one-line `thread:` message. | defect (message) | open at the end of the test |
+
+**B13 milestone (17:13Z).** Guide 33 (Hobbes's state of nature) done in new thread `hobbes-state-of-nature-guide`, closed: vault cf8a128 pushed (the note only), artifact [link removed]. A working mirror for a source that was down was recorded in the closing summary's method. Next: guide 34. Friction: none.
+
+**B13 milestone (17:17Z).** Guide 34 (Kant and the murderer at the door) done in new thread `kant-murderer-door-guide`, closed: vault a3ab3c7 pushed (the note only), artifact [link removed]. Next: guide 35. Friction: none.
+
+**B13 milestone (17:20Z).** Guide 35 (Nagel, "What Is It Like to Be a Bat?") done in new thread `nagel-bat-guide`, closed: vault af3f6a7 pushed (the note only), artifact [link removed]. Next: guide 36. Friction: none.
+
+**A15 report 29 (17:23Z).** Scenarios 46 and 47 committed: 3e9da8c, 8c65c39 (the planned ones were already covered, so it picked new ones). Suite green with four expected failures on both Pythons.
+
+| # | From | Finding | Class | Resolution |
+|---|---|---|---|---|
+| 52 | A15 (e2e s46) | With a read-only `.sessions` folder the lock cannot be created; the error is taken for the Windows "being deleted" case and retried for ever, so every hook hangs until Claude Code kills it. | defect | fix stop 13 |
+| 53 | A15 (e2e s47) | `THREADS_HOME="~/threads"` set unexpanded (an `env` entry in settings.json) puts the thread data in a folder named `~` inside each working folder, that is, inside the project. | defect (breaks "thread data never in a repository") | fix stop 13 |
+
+**Fix stop 13, the last (findings 48 to 53; 17:23Z to 17:31Z).** A15 interrupted after scenario 47, B13 interrupted in guide 36. One Fable subagent, reviewed by the coordinator; threads main be3970b, pushed; 69 tests on Python 3.14 and 3.9.
+- 52: every lock wait is bounded (8 s); a lock that cannot be created ends at once: hooks give up quietly, commands say which folder is not writable.
+- 53: `THREADS_HOME` is expanded (`~`, variables); a relative value is refused with one line, so thread data cannot land in the project.
+- 51: a log that cannot be written gives `thread: cannot write <path>: <reason>`, no traceback. 50: a failed append is rolled back (best effort), so the next capture does not double the turn; the e2e test for it asserts the old cut copy and needs two lines changed.
+- 48, 49 (skill): the closing template has a line for standing rules and method; a new thread seeded from an older summary verifies the carried state first.
+- Not run on Windows. Installed in the workshop (local). `companion-skill` rebased before the restart.
+
+**17:31Z restart.** A15 and B13 resumed in place ("Continue.") for the last minutes.
+
+**B13 milestone (17:32Z).** Guide 36 (Pascal's wager) finished after the resume in place (only the diagram was pending; nothing reopened or searched): vault 3429d28 pushed (the note only), artifact [link removed], thread `pascal-wager-guide` closed. Friction: none.
+
+**B13 milestone (17:35Z).** Guide 37 (Mill's harm principle) done in new thread `mill-harm-principle-guide`, closed: vault 0342e3f pushed (the note only), artifact [link removed]. A method fact recorded in the previous closing summary worked first try. Friction: none.
+
+**B13 milestone (17:39Z).** Guide 38 (Plato's allegory of the cave) done in new thread `plato-cave-guide`, closed: vault 0fd2010 pushed (the note only), artifact [link removed]. Friction: none.
+
+**B13 milestone (17:42Z).** Guide 39 (Hume, "Of Miracles") done in new thread `hume-miracles-guide`, closed: vault efa5920 pushed (the note only), artifact [link removed]. Friction: none.
+
+## End of the test (17:44Z)
+
+A15 and B13 interrupted and archived at 17:43Z. A15 had confirmed fix stop 13 (89263e9) and committed scenario 48; an uncommitted scenario 49 is left in the worktree. B13 had started guide 40 (thread `aristotle-function-argument-guide`, left open).
+
+| # | From | Finding | Class | Resolution |
+|---|---|---|---|---|
+| 54 | A15 (e2e s48, not reported before the stop) | A hook killed between the log append and the save of the offset logs the turn twice at the next capture. | defect, rare (nothing is lost) | open |
+
+### Totals
+
+- **Time.** First window 04:55Z to 05:39Z; resumed window 12:17Z to 17:44Z. The coordinator's turn stalled from 05:41Z to 12:11Z (cause not established), so the planned six hours were run in two parts.
+- **Sessions.** 28 test sessions in all (tracks A1 to A15 and B1 to B13), Opus 5.5 from B4 and A5 on. Recorded cost of the 19 sessions of the second coordinator: about 131 USD (one session's cost not recorded); the three long track-B sessions were 19 to 26 USD each.
+- **Stops.** 13 fix stops; every one stopped both tracks. Sessions were restarted about 35 times: fresh sessions told only "Continue the X work" and sessions resumed in place with "Continue.".
+- **Track A.** Three companion skills built, then hardened, brought in line with `thread show`, field notes, a keep-or-fold paper, and an end-to-end suite of 48 scenarios, all on the local branch `companion-skill` (not pushed, nothing installed).
+- **Track B.** 39 study guides finished (one thread each from guide 2 on), 37 committed and pushed in the vault by the sessions; two refused by the permission classifier and left for the owner, with the journal file.
+- **The tool.** 54 findings; 13 fix stops; unit tests 32 to 69; `thread.py` gained `thread show` (`<line>`, `--last`, `--from`, `--type`), recovery of uncaptured tails at open and close, secret masking at capture, a grep time bound, a per-thread lock, and many clearer messages. Thread data after the test: 50 threads, 11 MB.
+
+### What the stop/restart evidence shows
+
+- **Every restart found its thread**, by the session-start line or `thread list`, and continued without guessing, including cold starts where every thread of the work was closed (the newest closed summary named the next step).
+- **Rules given once were kept** by later sessions that were never told them (no push, no install, commit only the guide's own file, do not retry a refused commit), through 39 threads on track B.
+- **Searches worked first try** in almost every report. The misses: clipped notes before `thread show` existed (findings 7, 10), and `thread show <thread-id>`, tried first by three of three fresh sessions after `show` existed (finding 20).
+- **What an interrupt lost** before fix stop 3: everything after the last capture; once it misled the next session (finding 16). After it, `thread open` recovered the tail every time (4 to 44 transcript lines) and sessions used it to see exactly where the last one stopped.
+- **One compaction** happened (B11): the summary came back, the session checkpointed and went on; one detail was lost because it sat in an earlier thread's log (finding 29 and the wording of fix stop 10).
+- **Stale facts are the weak point.** Summaries went stale when the repository changed outside the thread (finding 21, ten mentions, all caused by the coordinator's rebases) and when a wrong fact was copied from thread to thread (finding 49). Sessions that checked the disk caught it every time; the tool gives no help.
+- **Influenced evidence.** A1, A2, B1, B2, A3 were told about stops. B6 and B8 inferred the purpose of the test from the report questions and paused "for a cold pickup"; later prompts said "do not wait". The coordinator's own actions (rebases under running sessions, one half-finished rebase at 12:58Z) shaped several reports.
+
+### Open at the end
+
+- **Owner decisions:** finding 21 (say at `thread open` when the branch moved under the summary), 29 (link the threads of a series), 30 (a thread keeps its old folder after a move to another machine), 17 (log format for multi-line tool input), 20 (make `thread show <id>` work), file-system compression of closed threads, the masking trade-off (`docs/MASKING-CASES.md` on the companion branch), e2e tests opt-in (the suite takes about 30 s), silent stop of capture when `.sessions` is deleted mid-session.
+- **Open defects:** 54 (hook killed between append and offset save: turn logged twice); a reopen racing a close; nothing was run on Windows or Linux.
+- **Not done:** the clock times of the first coordinator before 05:28Z were not corrected from the session records; the `companion-skill` branch is unreviewed by the owner and has one uncommitted scenario and one test that asserts the old behaviour of finding 50.
