@@ -373,7 +373,10 @@ def _capture(sid, tpath):
     st = state(sid)
     if not st:
         return 0
+    was = st.get("thread")
     tid = st["thread"] = bound(st)  # None also when it was closed or removed by another session
+    if isinstance(was, str) and not tid:
+        st["lost"] = was  # kept until the session's next command has said so (see target)
     tpath = tpath or find_transcript(sid)
     if tpath and os.path.exists(tpath):
         with open(tpath, encoding="utf-8", errors="replace") as f:
@@ -405,6 +408,7 @@ def detach(sid):
         st = state(sid)
         if st:
             st["thread"] = None
+            st.pop("lost", None)
             write(state_path(sid), json.dumps(st))
 
 
@@ -429,6 +433,7 @@ def bind(sid, tid, backfill=False):
                 # go back before this second
                 st["since"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 1))
         st["thread"], st["gen"] = tid, generation(tid)
+        st.pop("lost", None)
         write(state_path(sid), json.dumps(st))
         n = capture(sid)
         return n if fresh and backfill else 0
@@ -447,8 +452,10 @@ def target(args):
         return resolve(args.thread)
     tid = active(session_id())
     if not tid:
-        was = (state(session_id()) or {}).get("thread")
+        st = state(session_id()) or {}
+        was = st.get("lost") or st.get("thread")  # "lost": a hook's capture cleared the binding first
         if isinstance(was, str):
+            detach(session_id())  # said once; from here on the session is simply unbound
             die(f"thread {was} was closed or removed by another session, so this session is no longer "
                 f"captured: `thread open {was}` (or `thread reopen {was}`) to continue, or pass -t <id>")
         die("no active thread: run `thread open <id>` or pass -t <id>")
@@ -620,6 +627,8 @@ def cmd_checkpoint(a, close=False):
     if not is_open(tid):
         die(f"thread {tid} is closed; only notes can be added. `thread reopen {tid}` first")
     try_capture(sid)
+    if close:
+        recover(tid, sid)  # before the close: afterwards those sessions are of an earlier generation
     if len(text) > CAP:
         print(f"thread: summary is {len(text)} characters; only the first {CAP} are re-injected "
               f"after a compaction", file=sys.stderr)
@@ -642,7 +651,8 @@ def cmd_close(a):
 
 def cmd_detach(a):
     sid = session_id()
-    if not (state(sid) or {}).get("thread"):  # also clears a binding to a thread closed elsewhere
+    st = state(sid) or {}
+    if not (st.get("thread") or st.get("lost")):  # also clears a binding to a thread closed elsewhere
         die("no active thread")
     capture(sid)
     detach(sid)

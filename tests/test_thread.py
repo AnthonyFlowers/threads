@@ -886,6 +886,58 @@ class Case(unittest.TestCase):
         self.assertNotIn("recovered", self.run_cli("open", "a"))  # transcript gone: nothing to do
         self.assertNotIn("lost with the transcript", self.log("a"))
 
+    def test_close_recovers_the_tail_of_another_bound_session(self):
+        self.run_cli("new", "A")
+        self.say(msg("assistant", "written after the last hook"))
+        self.as_session("sess-2")  # never opened the thread
+        out = self.run_cli("close", "-t", "a", "Outcome: done")
+        self.assertIn("recovered 1 transcript lines from session sess-1 that ended without a capture", out)
+        kinds = [e[3] for e in thread.entries("a")]
+        self.assertEqual(kinds[-3:], ["assistant", "checkpoint", "event"])  # the tail is before the close
+        self.say(msg("user", "written after the close"))
+        self.assertEqual(self.run_cli("reopen", "a"), "reopened thread a\n")  # nothing to recover, no message
+        self.run_cli("new", "B")
+        self.as_session(SID)
+        self.run_cli("new", "C")  # sess-1 is bound to another thread now
+        self.say(msg("user", "belongs to c"))
+        self.as_session("sess-2")
+        self.run_cli("open", "a")
+        self.assertNotIn("recovered", self.run_cli("close", "Outcome: done again"))
+        self.assertNotIn("written after the close", self.log("a"))
+        self.assertNotIn("belongs to c", self.log("a"))
+        self.assertEqual(self.log("a").count("written after the last hook"), 1)
+
+    def test_told_once_of_a_close_or_removal_also_after_a_hook(self):
+        for n, cause in enumerate(("closed", "removed")):
+            for hook_first in (False, True):
+                self.as_session(SID)
+                self.run_cli("new", f"{cause} {hook_first}")
+                tid = thread.active(SID)
+                if cause == "closed":
+                    self.as_session("sess-2")
+                    self.run_cli("close", "-t", tid, "Outcome: done")
+                    self.as_session(SID)
+                else:
+                    (thread.home() / tid / "meta.json").unlink()
+                if hook_first:
+                    self.assertEqual(self.hook() + self.hook(), "")  # a second capture keeps the reason
+                    self.assertNotIn("*", self.run_cli("list"))  # a command with no target leaves it too
+                for want in (f"thread {tid} was closed or removed by another session", "no active thread: run"):
+                    err = io.StringIO()
+                    with contextlib.redirect_stderr(err), self.assertRaises(SystemExit):
+                        self.run_cli("note", "x")
+                    self.assertIn(want, err.getvalue(), (cause, hook_first))
+        self.run_cli("new", "Bound again")
+        self.as_session("sess-2")
+        self.run_cli("close", "-t", "bound-again", "Outcome: done")
+        self.as_session(SID)
+        self.hook()
+        self.run_cli("new", "Next")  # binding again drops the reason
+        self.run_cli("detach")
+        with contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(SystemExit):
+            self.run_cli("note", "x")
+        self.assertIn("no active thread: run", err.getvalue())
+
     def test_printed_details(self):
         self.run_cli("new", "A")
         self.run_cli("new", "B", "--kind", "bug")

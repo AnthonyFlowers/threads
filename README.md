@@ -174,7 +174,7 @@ captures by itself and would hide a missing hook.
 
 | Sign | Likely cause |
 |---|---|
-| A command says the thread "was closed or removed by another session" | Another session closed, reopened or removed it; this session stopped being captured at that point. Open it again. |
+| A command says the thread "was closed or removed by another session" | Another session closed, reopened or removed it; this session stopped being captured at that point. The message comes once; after it the session has no active thread. Open it again. |
 | `thread list` (run by the agent) shows no `*` | New session, `/clear` or fork; or another session closed or removed the thread. Say "open the X thread" or "continue the X work". |
 | `no Claude Code session id: nothing bound` | Claude Code older than 2.1.132, or the command was run outside Claude Code. |
 | The count in "Check the install" does not rise | `thread` not on the `PATH` Claude Code was started with; hooks blocked by policy (`/hooks`); folder not trusted. |
@@ -193,7 +193,7 @@ captures by itself and would hide a missing hook.
 | `thread grep <regex>` | Case-insensitive search of the log, newest entry first (`--oldest` reverses). Matches are grouped under their entry's header; a result's header also shows the call that produced it. `--count` prints the total, then a breakdown by entry type when there is more than one (and by thread with `--all`). `--max N` (10, max 30), `--offset N`, `--context N` (1, max 3), `--type user,assistant,note` to search only those entry types, `--all` for every thread. A page ends early at about 6000 characters; the footer gives the `--offset` of the first match not shown. Context lines stay inside the matching entry. Printed lines are clipped to 400 characters and then end with `[clipped; thread show N]` (`thread show -t <id> N` when the thread is not the active one: run the hint as printed). Earlier `thread grep` calls are not searched. Options go before a `--`. |
 | `thread show <line>` | Print the whole log entry that contains that line number of the log (the numbers `grep` prints, or the one in a `[clipped; thread show N]` hint), unclipped. Fails on a line number the log does not have. |
 | `thread detach` | Stop capturing this session. |
-| `thread close` | Close with a final summary (arguments or stdin). The log is kept. |
+| `thread close` | Close with a final summary (arguments or stdin). The log is kept. First it captures what other sessions bound to the thread left uncaptured, as `thread open` does, with the same `recovered N transcript lines ...` line. |
 | `thread reopen <id>` | Reopen a closed thread and bind this session. Fails on an open thread. |
 | `thread export <id>` | Print the summary and all notes as markdown. |
 | `thread hook` | Hook entry point; reads Claude Code's hook JSON on stdin. |
@@ -238,7 +238,7 @@ files read under `~/.threads` too).
 - Subagents' internal steps (their final reports are captured), images, most thinking, and very
   large tool outputs (Claude Code keeps only a preview of those in its transcript).
 - An interrupted or killed turn, until the same session is used again or the thread is opened
-  again while that session's transcript file still exists (`thread open` then prints
+  again or closed while that session's transcript file still exists (`thread open` or `thread close` then prints
   `recovered N transcript lines from session ...`).
 - Anything Claude Code changes in its undocumented transcript format without notice.
 

@@ -49,7 +49,8 @@ All commands are the local `thread` CLI. It uses no network.
 - `note`, `checkpoint` and `close` need text; pass it on stdin (arguments also work for plain
   words). Without text they fail (`empty text`, or after a 5-second wait).
 - If a command says the thread "was closed or removed by another session", this session is no
-  longer captured. Tell the user, and open the thread again only if they ask.
+  longer captured. It says so once; after that, commands say `no active thread`. Tell the user,
+  and open the thread again only if they ask.
 - Run `thread grep` as a command on its own. Its call and output are stored but never searched
   (the output only repeats the log), and anything else the same shell command prints becomes
   unsearchable with it.

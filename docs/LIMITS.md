@@ -18,13 +18,13 @@ The short version is in the [README](../README.md#what-it-does-not-capture).
   loses the last lines that belonged to the previous thread.
 - No hook runs when you interrupt a turn or when a session is killed. That turn is captured by the
   next hook or `thread` command in the same session. If the session is never used again (interrupted,
-  then archived), the next `thread open` of that thread from any session captures the rest of its
-  transcript, under the earlier session's id, and prints `recovered N transcript lines from session
+  then archived), the next `thread open` or `thread close` of that thread from any session captures
+  the rest of its transcript, under the earlier session's id, and prints `recovered N transcript lines from session
   <id> that ended without a capture (or is still running); ...`. The recovered entries are at the end
   of the log, after entries that are newer by their time stamp. Nothing is recovered when the
   transcript file is gone (deleted, or made on another machine), when that session is bound to
-  another thread or detached by then, or when the thread was closed in between; that work is then
-  not in the log, and nothing says so. A session still running on the same thread is captured early
+  another thread or detached by then, or for what that session did after the thread was closed
+  (`thread reopen` recovers nothing); that work is then not in the log, and nothing says so. A session still running on the same thread is captured early
   by the same step, which is harmless. After `thread close`, the rest of the closing turn is not captured.
 - If Claude Code replaces a transcript file with a shorter one, the file is captured again from its
   start (duplicate entries); if it rewrites it at the same or greater length, new lines can be missed.
@@ -95,8 +95,12 @@ The short version is in the [README](../README.md#what-it-does-not-capture).
   history too.
 - Lines in a transcript that carry another session's id are not captured.
 - When one session closes or removes a thread, another session bound to it is detached at its next
-  capture (its next `thread` command says so), and what that session did since its last capture is not stored. This holds even if the
-  thread is reopened or recreated in between; run `thread open` to bind again.
+  capture. Its next `thread` command that uses the active thread fails once with `thread <id> was
+  closed or removed by another session, ...`, also when a hook ran in between; after that the
+  session has no active thread. `thread close` first captures what that session did up to the close
+  if its transcript file is on disk; what it did after the close, or before a removal and after its
+  last capture, is not stored. This holds even if the thread is reopened or recreated in between;
+  run `thread open` to bind again.
 - A session that gets a new session id (for example after `/clear`) is not bound; run `thread open`
   again.
 - Search is lexical. If you cannot guess a word that was used, you will not find the entry.
