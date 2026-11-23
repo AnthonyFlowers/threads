@@ -18,6 +18,13 @@ mechanism-by-mechanism comparison and a recall test on real transcripts.
 - One Python 3 file, standard library only, no network access.
 - All data in `~/.threads/` (directories mode 0700, files 0600), never in a repository.
 - Terms are defined in [GLOSSARY.md](GLOSSARY.md); decisions in [docs/adr/](docs/adr/).
+- Obvious secrets are masked before they are stored; `thread show` prints any log entry whole; work
+  that an interrupted session left uncaptured is recovered when the thread is next opened or closed.
+- **Mostly developed by AI agents**, under the owner's direction and review: the code, the tests and
+  most of this documentation. It was then used and corrected in a field test with real agent
+  sessions that were stopped and restarted on purpose: [docs/FIELD-TEST.md](docs/FIELD-TEST.md).
+- Status: a personal tool, used on macOS. Linux should work the same way; Windows is tested only
+  outside Claude Code (see Install). The transcript format it reads is undocumented and can change.
 
 ## How it works
 
@@ -154,8 +161,8 @@ captures by itself and would hide a missing hook.
 - **Every new session, every `/clear` and every fork starts with no active thread.** Until you say
   "open the X thread" or "continue the X work" (or start a new one), that session is not captured.
   With the hooks installed, the agent is told in one line when open threads exist for the folder
-  (the session's folder is the thread's, above it or below it); it will not open one unasked. To check, ask the agent for `thread list`: `*` marks the active
-  thread. A `thread list` in your own
+  (the session's folder is the thread's, above it or below it); it will not open one unasked. To
+  check, ask the agent for `thread list`: `*` marks the active thread. A `thread list` in your own
   terminal never shows `*`, because the terminal is not a Claude Code session.
 - `thread list` shows open threads; `thread list --all` includes closed ones. To find a thread by
   what was said in it: `thread grep --all --count '<word>'`.
@@ -259,3 +266,13 @@ The full list, with the reasons, and the features left out of v1 are in
 ```sh
 python3 -m unittest discover -s tests
 ```
+
+The tests are the only gate. They must pass on Python 3.9 as well as on a current Python, and they
+use a temporary `THREADS_HOME`, never `~/.threads`. `thread.py` stays one file with no dependency
+outside the standard library and no network access ([docs/adr/](docs/adr/)). The development log is
+[docs/LOG.md](docs/LOG.md).
+
+## Licence
+
+Apache License 2.0: see [LICENSE](LICENSE). Copyright 2026 Anthony Flowers. Most of the code was
+written by AI agents; the licence gives you every permission the owner is able to give.
