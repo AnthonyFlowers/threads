@@ -47,7 +47,9 @@ All commands are the local `thread` CLI. It uses no network.
 - If a command prints `no Claude Code session id: nothing bound`, capture is off. Tell the user, and
   pass `-t <id>` on every command.
 - `note`, `checkpoint` and `close` need text; pass it on stdin (arguments also work for plain
-  words). Without text they fail (`empty text`, or after a 5-second wait).
+  words). Without text they fail: `empty text` when stdin held only blanks, `no text arrived on
+  stdin within 5 s` when stdin is an open pipe that sends nothing, and at once with `no text: pass
+  it as arguments or on stdin` when stdin is a terminal.
 - If a command says the thread "was closed or removed by another session", this session is no
   longer captured. It says so once; after that, commands say `no active thread`. Tell the user,
   and open the thread again only if they ask.
@@ -86,6 +88,8 @@ All commands are the local `thread` CLI. It uses no network.
 
 `note`, `checkpoint`, `close`, `grep` and `show` act on the active thread; pass `-t <id>` directly after the
 command name for another one. A closed thread accepts `note -t` only; reopen it for anything else.
+An id may be shortened to a unique prefix; an empty id is an error. A number is taken as an id
+prefix too (`thread open 20` opens `2024-plan` and says so): a log line is read with `thread show N`.
 
 Pass note, checkpoint and close text on stdin with a quoted heredoc, so quotes, backticks, `$` and
 words like `--max` stay literal:
@@ -164,6 +168,17 @@ grep for.
 
 `thread grep` is a case-insensitive regex over the log lines. Matching is lexical, so guess the words
 that were actually used and try alternatives: `thread grep 'timeout|timed out|ETIMEDOUT'`.
+
+Each match is printed under the header of its entry, as `> N: text`:
+
+```
+billing-null:3  === 2026-11-23T13:29:00Z 4f2a91c0 note ===
+> 4: the retry timeout was raised to 30 s
+[matches 1-1 of 1]
+```
+
+`N` (here 4) is the log line number: `thread show 4` prints that entry whole. `billing-null:3` is
+the thread and the line of the entry's header.
 
 - Always single-quote the regex. Put `--` before a pattern that starts with `-`, with any options
   ahead of it: `thread grep --count -- '--max'`.

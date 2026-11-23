@@ -338,8 +338,27 @@ class Case(unittest.TestCase):
         self.run_cli("note", "--", "--starts with a dash")
         self.assertIn("\n--starts with a dash\n", self.log("beta"))
         self.assertIn("Beta", self.run_cli("open", "be"))  # unique prefix
-        with self.assertRaises(SystemExit):
-            self.run_cli("open", "al")  # ambiguous prefix
+        def fails(*argv):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err), self.assertRaises(SystemExit):
+                self.run_cli(*argv)
+            return err.getvalue().strip()
+        self.assertEqual(fails("open", "al"), "thread: 'al' is ambiguous: alpha-one, alpha-one-2; "
+                         "give the full id, e.g. `thread open alpha-one`")
+        self.assertEqual(fails("open", "nosuch"), "thread: no thread 'nosuch': `thread list --all` shows the ids")
+        self.assertEqual(fails("open", "12"), "thread: no thread '12': `thread list --all` shows the ids; "
+                         "a log line is read with `thread show 12`")
+        for cmd in (("open", ""), ("reopen", " "), ("export", ""), ("note", "-t", "", "x")):
+            self.assertEqual(fails(*cmd), "thread: give a thread id; `thread list` shows them", cmd)
+        self.run_cli("new", "2024 plan")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertIn("2024 plan", self.run_cli("open", "20"))  # digits that only start an id
+            self.assertEqual(err.getvalue(), "thread: '20' taken as a prefix of thread 2024-plan; "
+                             "a log line is read with `thread show 20`\n")
+            self.run_cli("open", "2024-plan")  # an exact id says nothing
+            self.assertEqual(err.getvalue().count("\n"), 1)
+        self.run_cli("open", "beta")
         listed = self.run_cli("list", "--kind", "bug")
         self.assertIn("beta", listed)
         self.assertNotIn("alpha", listed)
@@ -1014,6 +1033,8 @@ class Case(unittest.TestCase):
                      "the -----BEGIN PRIVATE KEY----- line and the -----END PRIVATE KEY----- line\nbody"):
             self.assertEqual(m(same), same)
         # a BEGIN line with no END blanks at most 200 lines and never an entry header
+        self.assertEqual(m("-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQOYBF\n=ab\n-----END PGP PRIVATE KEY BLOCK-----\nafter"),
+                         "-----BEGIN PGP PRIVATE KEY BLOCK-----\n" + R + "\n" + R + "\n-----END PGP PRIVATE KEY BLOCK-----\nafter")
         cut = m("-----BEGIN PRIVATE KEY-----\nMIIabc\n=== t s note ===\nplain")
         self.assertEqual(cut, "-----BEGIN PRIVATE KEY-----\n" + R + "\n=== t s note ===\nplain")
         self.assertEqual(m("-----BEGIN PRIVATE KEY-----" + "\nx" * 300).count(R), 200)

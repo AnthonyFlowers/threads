@@ -82,7 +82,7 @@ def entry(ts, sid, kind, body, extra=""):
 # Every pattern stays on one line and is linear in the text: bounded repeats, no nested quantifiers.
 
 RED = "[redacted]"
-PEM_BEGIN = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----(?!.*-----END )")
+PEM_BEGIN = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----(?!.*-----END )")  # BLOCK: PGP
 SHAPES = re.compile(r"(?<![A-Za-z0-9])(?:sk-[A-Za-z0-9_-]{17,}|gh[pousr]_[A-Za-z0-9]{20,}"
                     r"|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}(?![A-Z0-9]))")
 BEARER = re.compile(r"(?i)(\bBearer[ \t]+)[A-Za-z0-9._~+/=-]{16,}")
@@ -110,7 +110,7 @@ def _assign(m):
 
 
 def _mask(text):
-    if "PRIVATE KEY-----" in text:  # a PEM block: the BEGIN and END lines stay, each body line goes
+    if "PRIVATE KEY-----" in text or "PRIVATE KEY BLOCK-----" in text:  # a PEM or PGP block: the BEGIN and END lines stay, each body line goes
         lines, left = text.split("\n"), 0
         for i, line in enumerate(lines):
             if left and not line.lstrip(" >|\t").startswith(("-----END ", "=== ")):
@@ -185,9 +185,18 @@ def resolve(ref):
     ids = all_ids()
     if ref in ids:
         return ref
+    if not ref.strip():  # '' is a prefix of every id
+        die("give a thread id; `thread list` shows them")
     hits = [i for i in ids if i.startswith(ref)]
-    if len(hits) != 1:
-        die(f"no thread '{ref}'" if not hits else f"'{ref}' is ambiguous: {', '.join(hits)}")
+    line = ref.isascii() and ref.isdigit()  # may be meant as a log line number
+    if not hits:
+        die(f"no thread '{ref}': `thread list --all` shows the ids"
+            + (f"; a log line is read with `thread show {ref}`" if line else ""))
+    if len(hits) > 1:
+        die(f"'{ref}' is ambiguous: {', '.join(hits)}; give the full id, e.g. `thread open {hits[0]}`")
+    if line:
+        print(f"thread: '{ref}' taken as a prefix of thread {hits[0]}; a log line is read with "
+              f"`thread show {ref}`", file=sys.stderr)
     return hits[0]
 
 
@@ -503,7 +512,7 @@ def try_capture(sid):
 
 
 def target(args):
-    if getattr(args, "thread", None):
+    if getattr(args, "thread", None) is not None:  # -t '' is an error, not the active thread
         return resolve(args.thread)
     tid = active(session_id())
     if not tid:

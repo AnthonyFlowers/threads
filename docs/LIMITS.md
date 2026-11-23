@@ -88,11 +88,14 @@ The short version is in the [README](../README.md#what-it-does-not-capture).
   - `Bearer <16 or more characters>`.
   - Token shapes anywhere: `sk-…` (20 or more characters), `ghp_…` and the other `gh?_` prefixes,
     `github_pat_…`, `xox[baprs]-…`, `AKIA` plus 16 characters.
-  - The body lines of a PEM private key block (at most 200 lines; the BEGIN and END lines stay).
+  - The body lines of a PEM private key block, and of a PGP one (`-----BEGIN PGP PRIVATE KEY
+    BLOCK-----`), at most 200 lines; the BEGIN and END lines stay.
   It cannot be turned off and has these effects:
   - A secret in any other form is stored as it is: a password as a command argument
     (`--password x`, `-p x`), one inside a URL, a name without those words, a value on the line
     after its name.
+  - A quoted value with an escaped quote is masked only up to it: `TOKEN='a\'b'` is stored as
+    `TOKEN='[redacted]'b'`, so the tail stays.
   - Ordinary text of the same form is masked too: `token = get_token()` or `password: str` in
     source code is stored as `token = [redacted]`, `password: [redacted]`.
   - `thread grep` for a masked value finds nothing; search for the name.
