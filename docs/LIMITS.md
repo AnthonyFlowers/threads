@@ -39,8 +39,10 @@ The short version is in the [README](../README.md#what-it-does-not-capture).
   capture run.
 - Thinking is stored only when the transcript holds its text. Current Claude Code leaves most
   thinking blocks empty.
-- `thread grep` and `thread open` clip what they print (400 and 600 characters per line or entry).
-  For the full text, read `~/.threads/<id>/log.txt` at the `thread:line` that grep shows.
+- `thread grep` and `thread open` clip what they print (400 and 600 characters per line or entry)
+  and end the clipped text with `[clipped; thread show N]`. `thread show <line>` prints the whole
+  entry that contains that log line, however long it is. When `thread open` has more than about
+  6000 characters of notes and messages to print, it drops the oldest from the top with no hint.
 - Recall costs tokens and does not always help: in the paper, on a task where summaries were
   enough, grep used 2.3 times the tokens for no significant gain.
 - `thread grep` has no time limit; a pattern with several `.*` on a very long line can run for a
@@ -65,6 +67,11 @@ The short version is in the [README](../README.md#what-it-does-not-capture).
   under `~/.threads`, a script that summarises all threads. `thread grep` skips its own earlier
   output at search time; the output of every other command is searched like anything else, so
   another thread's text can come back as a match in this one.
+- That includes secrets: the output of `env`, a token in a config file that was read, a key in a
+  command line. The log is append-only and there is no redaction (see "Not in v1"), so do not
+  print secrets while a thread is active. The owner can remove one by editing `log.txt` by hand.
+- A summary records facts about a repository (branch head, commit ids) as they were at the
+  checkpoint. The repository can change outside the thread, so verify them (`git log`) on resume.
 - The session-start line lists an open thread when the session's folder and the folder the thread
   was created in are the same or one is inside the other, at most 8, most recent log activity
   first. A session started in a root folder, and a thread created in one, get no line. A session

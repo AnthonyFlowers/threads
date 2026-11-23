@@ -190,7 +190,7 @@ class Case(unittest.TestCase):
         self.say(msg("user", "after close"))
         self.hook()
         self.assertNotIn("after close", self.log("a"))
-        self.assertNotIn("entries since", self.run_cli("open", "a"))  # events do not count
+        self.assertIn("-- 0 entries since", self.run_cli("open", "a"))  # events do not count
 
     def test_note_text_with_flags_modes_and_no_session(self):
         self.run_cli("new", "A")
@@ -373,8 +373,29 @@ class Case(unittest.TestCase):
         hit = next(l for l in first if l.startswith("> "))
         self.assertIn("needle 39", hit)
         self.assertLess(len(hit), 500)
+        self.assertRegex(hit, r"^> (\d+): .*… \[clipped; thread show \1\]$")
+        whole = self.run_cli("show", re.match(r"> (\d+)", hit)[1])
+        self.assertIn(f"{'z' * 2000} needle 39 {'z' * 2000}", whole)  # the line uncut
+        self.assertEqual(whole.count("\n"), 12)  # header, the 11 lines of the note, nothing else
         self.assertLessEqual(len(re.findall(r"^> ", page, re.M)), 30)
         self.assertEqual(len(re.findall(r"^> ", self.run_cli("grep", "needle", "--max", "0")[:9000], re.M)), 1)
+
+    def test_show_prints_one_whole_entry(self):
+        self.run_cli("new", "A")  # line 1-2: the `created` event
+        self.run_cli("new", "B")
+        self.run_cli("note", "-t", "a", stdin="first\nnote\n")  # lines 3-5
+        self.run_cli("note", "-t", "a", "last one")  # lines 6-7
+        self.assertRegex(self.run_cli("show", "1", "-t", "a"), r"^a:1  === \S+ sess-1 event ===\ncreated: A\n$")
+        for line in "345":  # the header, a middle line and the last line of the entry
+            self.assertRegex(self.run_cli("show", line, "-t", "a"), r"^a:3  === \S+ sess-1 note ===\nfirst\nnote\n$")
+        self.assertRegex(self.run_cli("show", "-t", "a", "7"), r"^a:6  === \S+ sess-1 note ===\nlast one\n$")
+        self.assertIn("created: B", self.run_cli("show", "2"))  # without -t: the active thread
+        for bad in ("0", "8", "-3", "x"):
+            err = io.StringIO()
+            with self.assertRaises(SystemExit) as e, contextlib.redirect_stderr(err):
+                self.run_cli("show", "-t", "a", "--", bad)
+            self.assertNotEqual(e.exception.code, 0)
+            self.assertTrue(err.getvalue().startswith(("thread: no line", "usage:")), err.getvalue())
 
     def test_hook_as_a_process_is_silent_exits_zero_and_caps_the_summary(self):
         self.run_cli("new", "A")
@@ -540,7 +561,8 @@ class Case(unittest.TestCase):
         self.run_cli("checkpoint", "  Goal: g  ")
         self.assertEqual(thread.summary("a"), "Goal: g\n")
         self.assertIn("checkpoint", self.kinds("a"))
-        self.assertNotIn("entries since", self.run_cli("open", "a"))
+        self.assertIn("\n-- 0 entries since the last checkpoint: the summary is current. --\n",
+                      self.run_cli("open", "a"))
         self.say(*[msg("user", f"message {i} " + "w" * 700) for i in range(8)])
         self.run_cli("note", "new note")
         out = self.run_cli("open", "a")
@@ -550,6 +572,9 @@ class Case(unittest.TestCase):
         self.assertNotIn("message 1 ", out)  # only the last 6 messages
         self.assertIn("message 2 ", out)
         self.assertNotIn("w" * 601, out)  # each clipped to 600 characters
+        n = self.log("a").splitlines().index("message 7 " + "w" * 700) + 1
+        self.assertIn(f"… [clipped; thread show {n - 1}]", out)  # the entry's header line
+        self.assertNotIn("clipped", out.split("new note")[1])  # a short entry gets no hint
         self.assertLess(self.log("a").index("message 7"), self.log("a").index("new note"))  # captured first
 
     def test_binding_does_not_outlive_close_or_removal_by_another_session(self):
@@ -851,7 +876,7 @@ class Case(unittest.TestCase):
         self.assertIn("* a  -  open", self.run_cli("list"))  # `open a` made it active
         page = self.run_cli("grep", "needle", "--context", "0", "-t", "b").splitlines()
         self.assertEqual(len(page), 3)  # location, the match alone, footer
-        self.assertEqual(page[1], "> 6: …" + "p" * 149 + " needle " + "q" * 243 + "…")
+        self.assertEqual(page[1], "> 6: …" + "p" * 149 + " needle " + "q" * 243 + "… [clipped; thread show 6]")
         self.assertEqual(self.run_cli("grep", "^created", "--context", "3", "-t", "a").count("created: A"), 1)
         self.assertNotIn("cut at", self.hook("SessionStart"))
         self.run_cli("checkpoint", stdin="S" * (thread.CAP + 1))

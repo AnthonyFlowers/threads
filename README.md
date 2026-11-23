@@ -187,17 +187,18 @@ captures by itself and would hide a missing hook.
 |---|---|
 | `thread new <title> [--kind K]` | Create a thread and bind this session. A session with no earlier thread is captured from its start (the command says how many lines). The title becomes the id (lower case, at most 50 characters), so keep it to a few words. The kind is a free label and is case-sensitive. |
 | `thread list [--all] [--kind K]` | List open threads, newest activity first. Each row: mark (`*` for the active thread), id, kind, status, date of the last log activity, title. The date is UTC, as in the log; a last line says so. |
-| `thread open <id>` | Print the summary and what came after the last checkpoint (how many entries, by entry type, then the notes and latest messages); bind this session, capturing from now on. A closed thread is shown read-only. A unique id prefix is enough. |
+| `thread open <id>` | Print the summary and what came after the last checkpoint (how many entries, by entry type, then the notes and latest messages, or a line that says there are 0; an entry above 600 characters ends with `[clipped; thread show N]`); bind this session, capturing from now on. A closed thread is shown read-only. A unique id prefix is enough. |
 | `thread note <text>` | Append a note (text as arguments or on stdin). Prints how many entries are newer than the last checkpoint, by entry type. |
 | `thread checkpoint` | Replace the summary (text as arguments or on stdin). Warns above 6000 characters, the amount re-injected after a compaction. |
-| `thread grep <regex>` | Case-insensitive search of the log, newest entry first (`--oldest` reverses). Matches are grouped under their entry's header; a result's header also shows the call that produced it. `--count` prints the total, then a breakdown by entry type when there is more than one (and by thread with `--all`). `--max N` (10, max 30), `--offset N`, `--context N` (1, max 3), `--type user,assistant,note` to search only those entry types, `--all` for every thread. A page ends early at about 6000 characters; the footer gives the `--offset` of the first match not shown. Context lines stay inside the matching entry. Printed lines are clipped to 400 characters. Earlier `thread grep` calls are not searched. Options go before a `--`. |
+| `thread grep <regex>` | Case-insensitive search of the log, newest entry first (`--oldest` reverses). Matches are grouped under their entry's header; a result's header also shows the call that produced it. `--count` prints the total, then a breakdown by entry type when there is more than one (and by thread with `--all`). `--max N` (10, max 30), `--offset N`, `--context N` (1, max 3), `--type user,assistant,note` to search only those entry types, `--all` for every thread. A page ends early at about 6000 characters; the footer gives the `--offset` of the first match not shown. Context lines stay inside the matching entry. Printed lines are clipped to 400 characters and then end with `[clipped; thread show N]`. Earlier `thread grep` calls are not searched. Options go before a `--`. |
+| `thread show <line>` | Print the whole log entry that contains that line number of the log (the numbers `grep` prints, or the one in a `[clipped; thread show N]` hint), unclipped. Fails on a line number the log does not have. |
 | `thread detach` | Stop capturing this session. |
 | `thread close` | Close with a final summary (arguments or stdin). The log is kept. |
 | `thread reopen <id>` | Reopen a closed thread and bind this session. Fails on an open thread. |
 | `thread export <id>` | Print the summary and all notes as markdown. |
 | `thread hook` | Hook entry point; reads Claude Code's hook JSON on stdin. |
 
-`note`, `checkpoint`, `close` and `grep` use the session's active thread; `-t <id>` names another.
+`note`, `checkpoint`, `close`, `grep` and `show` use the session's active thread; `-t <id>` names another.
 Put `-t` before the text: everything after the first word of text is taken as text. Text whose
 first word starts with `-` needs `--` before it (`thread note -- --max was wrong`). Use stdin for
 text with quotes, backticks or `$`. `checkpoint` and `close` refuse a closed thread; `note -t`

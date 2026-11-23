@@ -521,10 +521,14 @@ def show(tid):
     print(printable(summary(tid).strip()) or "(no checkpoint yet)")
     since = since_checkpoint(tid)
     if not since:
+        if summary(tid).strip():
+            print("\n-- 0 entries since the last checkpoint: the summary is current. --")
         return
     notes = [e for e in since if e[3] == "note"]
     msgs = [e for e in since if e[3] in ("user", "assistant")][-6:]
-    text = printable("\n".join(f"[{e[1]} {e[3]}] {e[5][:600]}" for e in sorted(notes + msgs)))
+    text = printable("\n".join(
+        f"[{e[1]} {e[3]}] {e[5][:600]}{f'… [clipped; thread show {e[0]}]' if len(e[5]) > 600 else ''}"
+        for e in sorted(notes + msgs)))
     if len(text) > CAP:
         text = "…" + text[-CAP:]
     print(f"\n-- {len(since)} entries since the last checkpoint ({by_type(since)}); "
@@ -618,12 +622,31 @@ def cmd_detach(a):
     print("detached: this session is no longer captured")
 
 
-def clip(line, start=0):
+def clip(line, start=0, n=None):
+    """At most 400 characters of a log line; `n` is its line number, for the hint to the whole entry."""
     line = printable(line)
     if len(line) <= 400:
         return line
     s = max(0, start - 150)
-    return ("…" if s else "") + line[s:s + 400] + "…"
+    return ("…" if s else "") + line[s:s + 400] + "…" + (f" [clipped; thread show {n}]" if n else "")
+
+
+def cmd_show(a):
+    tid = target(a)
+    p = home() / tid / "log.txt"
+    # splitlines, as in cmd_grep: the line numbers are the ones grep prints
+    lines = p.read_text(encoding="utf-8", errors="replace").splitlines() if p.exists() else []
+    start = a.line - 1
+    if not 0 <= start < len(lines):
+        die(f"no line {a.line} in the log of {tid}: it has {len(lines)} lines")
+    while start >= 0 and not HDR.match(lines[start]):
+        start -= 1
+    if start < 0:
+        die(f"line {a.line} of the log of {tid} is not inside an entry")
+    end = start + 1
+    while end < len(lines) and not HDR.match(lines[end]):
+        end += 1
+    print(printable(f"{tid}:{start + 1}  " + "\n".join(lines[start:end])))
 
 
 def cmd_grep(a):
@@ -682,7 +705,7 @@ def cmd_grep(a):
                 lo -= 1
             while hi - i < ctx and hi + 1 < len(lines) and not heads[hi + 1]:
                 hi += 1
-            near = {j + 1: clip(lines[j], m.start() if j == i else 0) for j in range(lo, hi + 1) if j > start}
+            near = {j + 1: clip(lines[j], m.start() if j == i else 0, j + 1) for j in range(lo, hi + 1) if j > start}
             hits.append((head.split()[1][:19] if head else "", tid, start + 1, i + 1, head, near))
     total = sum(by_type.values())
     spread = lambda d: ", ".join(f"{k} {v}" for k, v in sorted(d.items(), key=lambda kv: -kv[1]))
@@ -863,6 +886,8 @@ def main(argv=None):
     s.add_argument("--context", type=int, default=1, help="context lines (default 1, max 3)")
     s.add_argument("--type", help="search only these entry types, e.g. user,assistant,note")
     s.add_argument("--oldest", action="store_true", help="list the oldest matches first")
+    s = cmd("show", cmd_show, "print the whole log entry that contains a log line number", thread=True)
+    s.add_argument("line", type=int, help="a line number, as `thread grep` and `thread open` print them")
     s = cmd("list", cmd_list, "list open threads")
     s.add_argument("--all", action="store_true", help="include closed threads")
     s.add_argument("--kind")

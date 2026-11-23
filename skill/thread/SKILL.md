@@ -1,6 +1,6 @@
 ---
 name: thread
-description: Work threads - long-lived units of work (project, feature, idea, bug) kept across sessions with a searchable log and a summary, via the local `thread` CLI. Use for /thread new|open|close|reopen|list|note|grep|checkpoint|detach|export, "start a thread for...", "pick X back up", "continue the X work/thread", "where were we on X", "what threads are open", "close this out", and "what did we decide / try / find about X" from earlier sessions. Not for Slack or email threads, CPU threads or "this thread of conversation".
+description: Work threads - long-lived units of work (project, feature, idea, bug) kept across sessions with a searchable log and a summary, via the local `thread` CLI. Use for /thread new|open|close|reopen|list|note|grep|show|checkpoint|detach|export, "start a thread for...", "pick X back up", "continue the X work/thread", "where were we on X", "what threads are open", "close this out", and "what did we decide / try / find about X" from earlier sessions. Not for Slack or email threads, CPU threads or "this thread of conversation".
 ---
 
 # thread
@@ -58,6 +58,9 @@ All commands are the local `thread` CLI. It uses no network.
   summarises all threads. Do that only when the task needs it, and narrowly (`--count` first,
   `-t <id>`). Only `thread grep` output is skipped by later searches; the rest is found like
   anything else in this thread's log.
+- That capture includes secrets: the output of `env`, a token in a config file you read, a key in
+  a command line. The log is append-only and nothing is redacted. Do not print secrets while a
+  thread is active; if one was printed, tell the user (only they can edit the log).
 - A session has one active thread. `thread new` or `thread open` on another thread moves capture
   to it from that point on; say so to the user before you switch.
 
@@ -71,12 +74,13 @@ All commands are the local `thread` CLI. It uses no network.
 | Record a decision or finding | `thread note` with the text on stdin |
 | Replace the summary | `thread checkpoint` with the summary on stdin |
 | Recall details | `thread grep <regex>` |
+| Read one log entry whole | `thread show <line>` (a line number from `grep` or a `[clipped; ...]` hint) |
 | Stop capturing this session | `thread detach` |
 | Close out | `thread close` with the final summary on stdin |
 | Reopen a closed thread | `thread reopen <id>` |
 | Hand the result to someone | `thread export <id>` (summary + notes as markdown, to stdout) |
 
-`note`, `checkpoint`, `close` and `grep` act on the active thread; pass `-t <id>` directly after the
+`note`, `checkpoint`, `close`, `grep` and `show` act on the active thread; pass `-t <id>` directly after the
 command name for another one. A closed thread accepts `note -t` only; reopen it for anything else.
 
 Pass note, checkpoint and close text on stdin with a quoted heredoc, so quotes, backticks, `$` and
@@ -110,9 +114,14 @@ session is captured too (the command says how many lines); tell the user.
 2. `thread open <id-or-unique-prefix>`. It prints the summary, then the count of entries after the
    last checkpoint, by entry type (`7 entries ... (3 tool_use, 3 tool_result, 1 note)`), with their
    notes and latest messages; the other types are not shown, grep for them. A few are normal (the
-   end of the turn that wrote the checkpoint); many mean the summary is stale. Capture starts at this point: what the
+   end of the turn that wrote the checkpoint); many mean the summary is stale. With none it prints
+   `0 entries since the last checkpoint: the summary is current.` An entry above 600 characters
+   ends with `[clipped; thread show N]`: run that for the whole entry. Capture starts at this point: what the
    session did before is not logged, so note anything from it that matters.
-3. Tell the user in two or three lines where the work stands and the next step. Grep for what you
+3. Facts about a repository in the summary (branch head, commit ids, "tests green") go stale when
+   the repository changes outside the thread. Verify them (`git log`, `git status`) before you
+   rely on them.
+4. Tell the user in two or three lines where the work stands and the next step. Grep for what you
    still need. Checkpoint once you have caught up.
 
 A closed thread is shown read-only and is not bound. After `thread reopen`, checkpoint at once so
@@ -172,8 +181,9 @@ that were actually used and try alternatives: `thread grep 'timeout|timed out|ET
   `--` marks lines left out inside one. The header of a tool result ends with `<- ` and the call
   that produced it. When the match is in the header itself (a call id, a tool name), no line
   carries `>`.
-- Printed lines are clipped to 400 characters. For the full text, read
-  `~/.threads/<thread>/log.txt` at the line number shown.
+- Printed lines are clipped to 400 characters and then end with `[clipped; thread show N]`. For
+  the whole entry, run `thread show <line>` with any line number of it (`-t <id>` for a thread
+  that is not the active one). Do not read `log.txt` with `sed` or `cat` for this.
 
 ### Closing
 
