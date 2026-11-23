@@ -76,8 +76,29 @@ The short version is in the [README](../README.md#what-it-does-not-capture).
   output at search time; the output of every other command is searched like anything else, so
   another thread's text can come back as a match in this one.
 - That includes secrets: the output of `env`, a token in a config file that was read, a key in a
-  command line. The log is append-only and there is no redaction (see "Not in v1"), so do not
-  print secrets while a thread is active. The owner can remove one by editing `log.txt` by hand.
+  command line. So do not print secrets while a thread is active. The owner can remove one by
+  editing `log.txt` by hand.
+- Obvious secrets are masked when text is stored in `log.txt` and `summary.md`: the value becomes
+  `[redacted]`, the name and the line stay. This covers obvious patterns only and is not a guarantee:
+  - `NAME=value`, `NAME: value`, `"NAME": "value"` (also after `export`), where the name contains
+    TOKEN, SECRET, PASSWORD, PASSWD, API_KEY, APIKEY, API-KEY, ACCESS_KEY, PRIVATE_KEY or
+    CREDENTIAL, or ends in `_KEY` or `_AUTH`, in any letter case. A bare value ends at the first
+    space or quote. Not masked: an empty value, `null`, `true`, `false`, and a number after a
+    TOKEN name (`max_tokens: 4096`).
+  - `Bearer <16 or more characters>`.
+  - Token shapes anywhere: `sk-…` (20 or more characters), `ghp_…` and the other `gh?_` prefixes,
+    `github_pat_…`, `xox[baprs]-…`, `AKIA` plus 16 characters.
+  - The body lines of a PEM private key block (at most 200 lines; the BEGIN and END lines stay).
+  It cannot be turned off and has these effects:
+  - A secret in any other form is stored as it is: a password as a command argument
+    (`--password x`, `-p x`), one inside a URL, a name without those words, a value on the line
+    after its name.
+  - Ordinary text of the same form is masked too: `token = get_token()` or `password: str` in
+    source code is stored as `token = [redacted]`, `password: [redacted]`.
+  - `thread grep` for a masked value finds nothing; search for the name.
+  - The session transcript under `~/.claude/projects` is not masked, and neither is the thread
+    title, log text stored before this version, or anything on the screen.
+  - If the masking step itself fails, the text is stored unmasked: a write is never lost to it.
 - A summary records facts about a repository (branch head, commit ids) as they were at the
   checkpoint. The repository can change outside the thread, so verify them (`git log`) on resume.
 - The session-start line lists an open thread when the session's folder and the folder the thread
@@ -111,7 +132,7 @@ Each of these was considered and left out. Add one when its trigger shows up.
 
 | Left out | Why | Add it when |
 |---|---|---|
-| Secret redaction | Scanning is unreliable and the same text is already in Claude Code's transcripts. | Logs must leave the machine, or policy requires it. |
+| Full secret redaction (entropy scan, rewriting old log text, masking the transcript) | Scanning is unreliable; only obvious patterns are masked (see Limits). | Logs must leave the machine, or policy requires it. |
 | Truncation of long tool outputs | The point of the pattern is a log that keeps what the transcript holds. | Disk use becomes a problem. |
 | Compressing or archiving closed threads | Plain files are simpler to search and inspect. | `~/.threads` grows past a few GB. |
 | Plugin packaging | Work may block plugin marketplaces; a few manual steps are enough. | Several people install it. |

@@ -124,6 +124,15 @@
     other threads included (also in `docs/LIMITS.md` and the README).
   - 6, cosmetic: `thread list` shows UTC dates and ends with "(dates: last log activity, UTC)".
   - Tests stay at 32; four were extended. `hooks.json` unchanged; **replace the installed skill copy**.
+- 2026-11-23: Masking of obvious secrets at capture (owner's request: a session's `env` output put
+  a token into a log), and a clearer `thread show <id>` error (one subagent).
+  - `mask()` runs in `append()`, the one place that writes `log.txt`, and on the text of
+    `summary.md`. Patterns and effects are in `docs/LIMITS.md`; the row left "Not in v1" for full
+    redaction only. On any exception the text is stored unmasked. No option turns it off.
+  - Measured on 5 MB: 0.2 to 0.3 s for ordinary text, 0.9 s for the worst case found (one line made
+    only of keywords), Python 3.9 and 3.14.
+  - `thread show <not a number>` exits 1 and names `thread grep`, `thread open` and `thread export`.
+  - Tests 36 -> 40. `hooks.json` unchanged; **replace the installed skill copy**.
 
 ## Research notes
 

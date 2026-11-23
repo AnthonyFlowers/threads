@@ -390,7 +390,15 @@ class Case(unittest.TestCase):
             self.assertRegex(self.run_cli("show", line, "-t", "a"), r"^a:3  === \S+ sess-1 note ===\nfirst\nnote\n$")
         self.assertRegex(self.run_cli("show", "-t", "a", "7"), r"^a:6  === \S+ sess-1 note ===\nlast one\n$")
         self.assertIn("created: B", self.run_cli("show", "2"))  # without -t: the active thread
-        for bad in ("0", "8", "-3", "x"):
+        for bad in ("a", "1.5", "fix-login"):  # a thread id is not a line number: say what is
+            err = io.StringIO()
+            with self.assertRaises(SystemExit) as e, contextlib.redirect_stderr(err):
+                self.run_cli("show", bad)
+            self.assertEqual(e.exception.code, 1)
+            self.assertEqual(err.getvalue().count("\n"), 1)
+            for word in ("log line number", "thread grep", "thread open <id>", "thread export <id>"):
+                self.assertIn(word, err.getvalue())
+        for bad in ("0", "8", "-3"):
             err = io.StringIO()
             with self.assertRaises(SystemExit) as e, contextlib.redirect_stderr(err):
                 self.run_cli("show", "-t", "a", "--", bad)
@@ -971,6 +979,94 @@ class Case(unittest.TestCase):
         self.run_cli("checkpoint", stdin="S" * (thread.CAP + 1))
         self.assertIn(f"cut at {thread.CAP} characters", self.hook("SessionStart"))
 
+    # every secret below is made up
+    def test_obvious_secrets_are_masked_when_stored(self):
+        m, R = thread.mask, "[redacted]"
+        for raw, want in (
+                ("GH_TOKEN=abc123def", "GH_TOKEN=" + R),
+                ("export MY_SECRET=hunter2 next", "export MY_SECRET=" + R + " next"),
+                ("db_password: hunter2", "db_password: " + R),
+                ("PASSWD = 'two words'", "PASSWD = '" + R + "'"),
+                ('{"api_key": "abc", "n": 1}', '{"api_key": "' + R + '", "n": 1}'),
+                ('{\\"apiKey\\": \\"abc\\"}', '{\\"apiKey\\": \\"' + R + '\\"}'),
+                ("AWS_SECRET_ACCESS_KEY=abc/def+1", "AWS_SECRET_ACCESS_KEY=" + R),
+                ("ssl_private_key_pass: abc", "ssl_private_key_pass: " + R),
+                ("credentials=abc", "credentials=" + R),
+                ("SIGNING_KEY=abc", "SIGNING_KEY=" + R),
+                ("BASIC_AUTH: abc", "BASIC_AUTH: " + R),
+                ("PASSWORD=12345", "PASSWORD=" + R),
+                ('token="neverclosed', 'token="' + R),
+                ("Authorization: Bearer abcdefghij0123456789", "Authorization: Bearer " + R),
+                ("curl -H 'authorization: bearer abcdefghij.0123456789'", "curl -H 'authorization: bearer " + R + "'"),
+                ("key sk-" + "a1B2" * 6 + " used", "key " + R + " used"),
+                ("ghp_" + "a1B2" * 9, R), ("gho_" + "a1B2" * 9, R),
+                ("github_pat_" + "a1B2_" * 8, R),
+                ("xoxb-1234567890-abcdefABCDEF", R),
+                ("id AKIA" + "A1B2" * 4 + ".", "id " + R + "."),
+                ("GH_TOKEN=ghp_" + "a1B2" * 9, "GH_TOKEN=" + R),
+                ("-----BEGIN RSA PRIVATE KEY-----\nMIIabc\ndef==\n-----END RSA PRIVATE KEY-----\nafter",
+                 "-----BEGIN RSA PRIVATE KEY-----\n" + R + "\n" + R + "\n-----END RSA PRIVATE KEY-----\nafter")):
+            self.assertEqual(m(raw), want)
+            self.assertEqual(m(want), want)  # also: what is already masked stays as it is
+        for same in ("TOKENS_USED=1234", "max_tokens: 4096", '"input_tokens": 12,', "token count: 1,234",
+                     "TOKEN=", 'PASSWORD=""', "password: null", "API_KEY=[redacted]", "SSH_KEY_PATH=/x",
+                     "monkey: banana", "if token == other:", "Bearer short", "sk-short", "task-" + "a" * 30,
+                     "the -----BEGIN PRIVATE KEY----- line and the -----END PRIVATE KEY----- line\nbody"):
+            self.assertEqual(m(same), same)
+        # a BEGIN line with no END blanks at most 200 lines and never an entry header
+        cut = m("-----BEGIN PRIVATE KEY-----\nMIIabc\n=== t s note ===\nplain")
+        self.assertEqual(cut, "-----BEGIN PRIVATE KEY-----\n" + R + "\n=== t s note ===\nplain")
+        self.assertEqual(m("-----BEGIN PRIVATE KEY-----" + "\nx" * 300).count(R), 200)
+
+    def test_masking_covers_every_write_path_and_keeps_the_line_count(self):
+        secret = "ghp_" + "Zz9" * 12
+        self.run_cli("new", "A")
+        body = "line one\nDEPLOY_TOKEN=tok-value-1\n\nAuthorization: Bearer " + "q" * 20 + "\nlast " + secret
+        self.say(msg("user", body),
+                 msg("assistant", [{"type": "tool_use", "id": "t1", "name": "Bash",
+                                    "input": {"command": "curl -H 'X-Api-Key: tok-value-2' u"}}]),
+                 msg("user", [{"type": "tool_result", "tool_use_id": "t1", "content": "PASSWORD=tok-value-3"}]))
+        self.hook()  # capture by a hook
+        self.run_cli("note", "the password: tok-value-4")
+        self.run_cli("checkpoint", "state; SECRET=tok-value-5")
+        log = self.log("a")
+        for leaked in (secret, "q" * 20, "tok-value"):
+            self.assertNotIn(leaked, log)
+            self.assertNotIn(leaked, (thread.home() / "a" / "summary.md").read_text())
+        self.assertEqual(log.count("[redacted]"), 7)
+        self.assertIn("DEPLOY_TOKEN=[redacted]\n\nAuthorization: Bearer [redacted]\nlast [redacted]\n", log)
+        n = int(self.run_cli("grep", "line one").split("> ")[1].split(":")[0])
+        self.assertEqual(self.log("a").splitlines()[n + 3], "last [redacted]")  # line numbers as unmasked
+        self.assertIn("[matches 0-0 of 0]", self.run_cli("grep", "tok-value"))
+
+    def test_a_failing_masker_still_writes_the_entry(self):
+        self.run_cli("new", "A")
+        old = thread._mask
+        thread._mask = lambda text: 1 / 0
+        try:
+            self.say(msg("user", "captured anyway TOKEN=tok-value-1"))
+            self.hook()
+            self.run_cli("note", "noted anyway")
+            self.run_cli("checkpoint", "summed anyway")
+        finally:
+            thread._mask = old
+        for text in ("captured anyway TOKEN=tok-value-1", "noted anyway", "summed anyway"):
+            self.assertIn(text, self.log("a"))
+        self.assertEqual((thread.home() / "a" / "summary.md").read_text(), "summed anyway\n")
+        self.assertFalse((thread.home() / "errors.log").exists())
+
+    def test_masking_a_5_mb_result_is_fast(self):
+        line = 'x = {"max_tokens": 4096, "name": "value"}  # token password secret_key ' + "ab12" * 20 + "\n"
+        for big in (line * (5_000_000 // len(line)),         # many short lines
+                    "tokenpassword_key" * 300_000,             # one line that is all keywords
+                    "token: \"" + "a\\" * 2_500_000,          # a quote that never closes
+                    "-----BEGIN PRIVATE KEY-----\n" * 180_000,  # BEGIN lines without an END
+                    "sk-" + "A" * 5_000_000):                  # one token-shaped line
+            self.assertGreaterEqual(len(big), 4_900_000)
+            t = time.time()
+            out = thread.mask(big)
+            self.assertLess(time.time() - t, 2)
+            self.assertEqual(out.count("\n"), big.count("\n"))
 
 if __name__ == "__main__":
     unittest.main()

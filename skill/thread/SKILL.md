@@ -60,8 +60,11 @@ All commands are the local `thread` CLI. It uses no network.
   `-t <id>`). Only `thread grep` output is skipped by later searches; the rest is found like
   anything else in this thread's log.
 - That capture includes secrets: the output of `env`, a token in a config file you read, a key in
-  a command line. The log is append-only and nothing is redacted. Do not print secrets while a
-  thread is active; if one was printed, tell the user (only they can edit the log).
+  a command line. The log is append-only. Do not print secrets while a thread is active: obvious
+  patterns (`TOKEN=...`, `password: ...`, `Bearer ...`, `ghp_...`, a PEM key) are stored as
+  `[redacted]`, but that is no guarantee, and the same masking changes code such as
+  `token = get_token()` in the log. If one was printed,
+  tell the user (only they can edit the log).
 - A session has one active thread. `thread new` or `thread open` on another thread moves capture
   to it from that point on; say so to the user before you switch.
 

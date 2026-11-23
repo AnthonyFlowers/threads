@@ -78,8 +78,63 @@ def entry(ts, sid, kind, body, extra=""):
     return head + "\n" + "\n".join(lines) + "\n"
 
 
+# ---- masking of obvious secrets, at the moment text is stored (docs/LIMITS.md) ----
+# Every pattern stays on one line and is linear in the text: bounded repeats, no nested quantifiers.
+
+RED = "[redacted]"
+PEM_BEGIN = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----(?!.*-----END )")
+SHAPES = re.compile(r"(?<![A-Za-z0-9])(?:sk-[A-Za-z0-9_-]{17,}|gh[pousr]_[A-Za-z0-9]{20,}"
+                    r"|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}(?![A-Z0-9]))")
+BEARER = re.compile(r"(?i)(\bBearer[ \t]+)[A-Za-z0-9._~+/=-]{16,}")
+# NAME=value, NAME: value, "NAME": "value". The match starts at the keyword (what is before it in
+# the name stays as it is); _KEY and _AUTH count only at the end of the name.
+ASSIGN = re.compile(
+    r"""(?i)(TOKEN|SECRET|PASSWORD|PASSWD|API[_-]?KEY|ACCESS_KEY|PRIVATE_KEY|CREDENTIAL"""
+    r"""|_KEY(?![A-Za-z0-9_.-])|_AUTH(?![A-Za-z0-9_.-]))"""
+    r"""([A-Za-z0-9_.-]{0,40}\\?["']?[ \t]*[:=][ \t]*)"""               # rest of the name, separator
+    r"""(\\"[^"\\\n]*\\"|"(?:[^"\\\n]|\\.)*"|'[^'\n]*'"""             # \"v\"  "v"  'v'
+    r"""|(?:\\?["'])?[^\s"'\\=>:][^\s"']*)""")                          # bare, or a quote never closed
+PLAIN = re.compile(r"(?i)[\d.,]+|(?:null|none|true|false),?")
+
+
+def _assign(m):
+    v = m[3]
+    q = next((q for q in ('\\"', '"', "'") if v.startswith(q)), "")
+    end = q if q and v.endswith(q) and len(v) >= 2 * len(q) else ""
+    inner = v[len(q):len(v) - len(end)]
+    # a token count (max_tokens: 4096) is not a secret; neither is an empty or absent value
+    if not inner or inner.startswith(RED) or PLAIN.fullmatch(inner) and \
+            (m[1].upper() == "TOKEN" or not inner[0].isdigit()):
+        return m[0]
+    return m[1] + m[2] + q + RED + end
+
+
+def _mask(text):
+    if "PRIVATE KEY-----" in text:  # a PEM block: the BEGIN and END lines stay, each body line goes
+        lines, left = text.split("\n"), 0
+        for i, line in enumerate(lines):
+            if left and not line.lstrip(" >|\t").startswith(("-----END ", "=== ")):
+                lines[i], left = RED, left - 1
+            else:
+                # shortcut: at most 200 body lines, so a BEGIN line that is only quoted (docs,
+                # a test) cannot blank the rest of a capture; raise it if real keys are longer
+                left = 200 if PEM_BEGIN.search(line) else 0
+        text = "\n".join(lines)
+    return ASSIGN.sub(_assign, BEARER.sub(r"\1" + RED, SHAPES.sub(RED, text)))
+
+
+def mask(text):
+    """Text with the value of obvious secrets replaced by [redacted]; line count unchanged.
+    It must never cost a write: on any error the text is stored as it is."""
+    try:
+        return _mask(text)
+    except Exception:
+        return text
+
+
 def append(tid, text):
     # one append-mode write per call, so entries from concurrent sessions do not interleave mid-entry
+    text = mask(text)
     path = str(home() / tid / "log.txt")
     if os.name == "nt":
         # the C runtime's O_APPEND seeks and then writes, and text mode splits the write at each
@@ -633,7 +688,7 @@ def cmd_checkpoint(a, close=False):
         print(f"thread: summary is {len(text)} characters; only the first {CAP} are re-injected "
               f"after a compaction", file=sys.stderr)
     append(tid, entry(now(), sid, "checkpoint", text))  # the log first: it is the record
-    write(home() / tid / "summary.md", text + "\n")
+    write(home() / tid / "summary.md", mask(text) + "\n")
     if close:
         mine = active(sid) == tid
         m = meta(tid)
@@ -669,11 +724,14 @@ def clip(line, start=0, n=None):
 
 
 def cmd_show(a):
+    if not re.fullmatch(r"[+-]?\d+", a.line):
+        die("show takes a log line number (see `thread grep`); to read a thread use "
+            "`thread open <id>` or `thread export <id>`")
     tid = target(a)
     p = home() / tid / "log.txt"
     # splitlines, as in cmd_grep: the line numbers are the ones grep prints
     lines = p.read_text(encoding="utf-8", errors="replace").splitlines() if p.exists() else []
-    start = a.line - 1
+    start = int(a.line) - 1
     if not 0 <= start < len(lines):
         die(f"no line {a.line} in the log of {tid}: it has {len(lines)} lines")
     while start >= 0 and not HDR.match(lines[start]):
@@ -925,7 +983,7 @@ def main(argv=None):
     s.add_argument("--type", help="search only these entry types, e.g. user,assistant,note")
     s.add_argument("--oldest", action="store_true", help="list the oldest matches first")
     s = cmd("show", cmd_show, "print the whole log entry that contains a log line number", thread=True)
-    s.add_argument("line", type=int, help="a line number, as `thread grep` and `thread open` print them")
+    s.add_argument("line", help="a line number, as `thread grep` and `thread open` print them")
     s = cmd("list", cmd_list, "list open threads")
     s.add_argument("--all", action="store_true", help="include closed threads")
     s.add_argument("--kind")
