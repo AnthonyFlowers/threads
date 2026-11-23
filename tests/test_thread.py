@@ -1267,5 +1267,54 @@ class Case(unittest.TestCase):
         (thread.home() / "a").mkdir(parents=True)  # another `thread new a` got here first, meta.json not yet written
         self.assertIn("created thread a-2", self.run_cli("new", "A"))
 
+    def test_parallel_closes_one_wins(self):
+        self.run_cli("new", "A")
+        script = str(Path(thread.__file__).resolve())
+        env = {k: v for k, v in os.environ.items() if k != "CLAUDE_CODE_SESSION_ID"}
+        for rnd in (1, 2, 3):
+            procs = [subprocess.Popen([sys.executable, script, "close", "-t", "a", f"Outcome: C{i}"], env=env,
+                                      stdout=subprocess.DEVNULL, stderr=subprocess.PIPE) for i in range(4)]
+            errs = [p.communicate()[1].decode() for p in procs]
+            self.assertEqual(sorted(p.returncode for p in procs), [0, 1, 1, 1], errs)
+            self.assertEqual(sorted(errs)[1:], ["thread: thread a is closed; only notes can be added. "
+                                                "`thread reopen a` first\n"] * 3)
+            self.assertEqual(self.log("a").count(" event ===\nclosed\n"), rnd)
+            self.assertEqual(self.log("a").count(" checkpoint ===\n"), rnd)  # the losers wrote nothing
+            self.assertEqual(thread.meta("a")["closes"], rnd)
+            self.assertFalse((thread.home() / "a" / ".lock").exists())
+            self.run_cli("reopen", "a")
+
+    def test_session_start_says_the_thread_was_closed_elsewhere(self):
+        self.run_cli("new", "A")
+        os.environ["CLAUDE_CODE_SESSION_ID"] = "sess-2"
+        self.run_cli("close", "-t", "a", "Outcome: done")
+        os.environ["CLAUDE_CODE_SESSION_ID"] = SID
+        line = ("Thread a was closed or removed by another session, so this session is no longer captured. "
+                "Continue it (`thread open a`, or `thread reopen a` when it is closed) only if you are asked to.\n")
+        self.assertEqual(self.hook("Stop"), "")  # only a session start prints
+        for source in ("resume", "compact", "startup"):  # every start, until a command has said it
+            self.assertEqual(self.hook("SessionStart", source), line)
+        self.assertEqual(self.hook("SessionStart", "resume", agent_id="sub"), "")
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(err):
+            self.run_cli("note", "n")
+        self.assertIn("thread a was closed or removed by another session", err.getvalue())
+        self.assertEqual(self.hook("SessionStart", "resume"), "")  # said by a command: now simply unbound
+
+    def test_show_last_and_from_take_entry_types(self):
+        self.run_cli("new", "A")
+        self.say(msg("user", "ask"), msg("assistant", [{"type": "tool_use", "name": "Bash", "id": "t1", "input": {"command": "ls"}}]),
+                 msg("user", [{"type": "tool_result", "tool_use_id": "t1", "content": "LONG RESULT"}]), msg("assistant", "reply"))
+        self.hook()
+        out = self.run_cli("show", "--last", "9", "--type", "user,assistant")
+        self.assertEqual([l.split()[4] for l in out.splitlines() if l.startswith("a:")], ["user", "assistant"])
+        self.assertNotIn("LONG RESULT", out)
+        self.assertEqual(self.run_cli("show", "--from", "1", "--type", "tool_result").count("\na:") + 1, 1)
+        self.assertEqual(self.run_cli("show", "--last", "1", "--type", "user").count("ask"), 1)
+        for bad in (("--last", "2", "--type", "nope"), ("--last", "2", "--type", "compaction"), ("3", "--type", "user")):
+            with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+                self.run_cli("show", *bad)
+
+
 if __name__ == "__main__":
     unittest.main()

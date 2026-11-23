@@ -34,7 +34,9 @@ The short version is in the [README](../README.md#what-it-does-not-capture).
   start (duplicate entries); if it rewrites it at the same or greater length, new lines can be missed.
 - Commands and hooks of one session capture one at a time, through a lock file. A lock older than
   5 seconds is taken to be left by a process that died and is removed, so a command waits at most
-  that long.
+  that long. `thread checkpoint` and `thread close` of one thread also run one at a time, through
+  a lock file of the thread with the same 5 seconds: of two closes at the same moment one wins and
+  the other fails with "thread <id> is closed; ...". `thread reopen` and `thread note` do not take it.
 - A background subagent's finishing notice and a message from another agent are logged with the
   entry type `subagent`. A subagent's report is captured in whichever form Claude Code delivers it:
   as the `tool_result` of its Agent call, or as a separate message turn (entry type `subagent`;
@@ -132,7 +134,8 @@ The short version is in the [README](../README.md#what-it-does-not-capture).
 - When one session closes or removes a thread, another session bound to it is detached at its next
   capture. Its next `thread` command that uses the active thread fails once with `thread <id> was
   closed or removed by another session, ...`, also when a hook ran in between; after that the
-  session has no active thread. `thread close` first captures what that session did up to the close
+  session has no active thread. Until then, each session start of it (resume and compaction too)
+  prints `Thread <id> was closed or removed by another session, ...`. `thread close` first captures what that session did up to the close
   if its transcript file is on disk; what it did after the close, or before a removal and after its
   last capture, is not stored. This holds even if the thread is reopened or recreated in between;
   run `thread open` to bind again.
@@ -155,6 +158,6 @@ Each of these was considered and left out. Add one when its trigger shows up.
 | Per-kind templates | Kind is only a label. | Bug and project summaries clearly need different headings. |
 | Parent/child links | Threads are flat; name the related id in a note. | Related threads become hard to find with `grep --all`. |
 | Capture of subagents' internal steps | Logs would grow many times over. | A subagent's internal steps are needed for recall. |
-| Locking between sessions | Each session has its own lock for capture. Appends from different sessions are one write each (atomic on POSIX, and on Windows through `FILE_APPEND_DATA`); the summary is last-writer-wins with every version in the log. | Two sessions on one thread lose or interleave entries. |
+| Locking between sessions | Each session has its own lock for capture; a thread has one for checkpoint and close only. Appends from different sessions are one write each (atomic on POSIX, and on Windows through `FILE_APPEND_DATA`); the summary is the last checkpoint written, with every version in the log. | Two sessions on one thread lose or interleave entries. |
 | `thread delete` | `rm -rf ~/.threads/<id>` does it. | A retention rule needs an audited command. |
 | `thread rename` | Ids are rarely typed in full; a prefix works. | A title turns out badly wrong often. |

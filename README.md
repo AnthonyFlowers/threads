@@ -42,7 +42,8 @@ mechanism-by-mechanism comparison and a recall test on real transcripts.
 - When a session starts with no active thread in a folder where open threads were started (that
   folder or one below it), a hook prints one line naming them. The agent opens one only if you ask
   to continue that work. When a session with an active thread starts or resumes, the hook prints
-  one line naming it.
+  one line naming it. When another session closed or removed the session's thread, every session
+  start (resume and compaction too) prints one line that says so, until a `thread` command has said it.
 
 ## Install
 
@@ -200,10 +201,10 @@ captures by itself and would hide a missing hook.
 | `thread checkpoint` | Replace the summary (text as arguments or on stdin). Warns above 6000 characters, the amount re-injected after a compaction. |
 | `thread grep <regex>` | Case-insensitive search of the log, newest entry first (`--oldest` reverses). Matches are grouped under their entry's header; a result's header also shows the call that produced it. `--count` prints the total, then a breakdown by entry type when there is more than one (and by thread with `--all`). `--max N` (10, max 30), `--offset N`, `--context N` (1, max 3), `--type user,assistant,note` to search only those entry types, `--all` for every thread. A page ends early at about 6000 characters; the footer gives the `--offset` of the first match not shown. Context lines stay inside the matching entry. Printed lines are clipped to 400 characters and then end with `[clipped; thread show N]` (`thread show -t <id> N` when the thread is not the active one: run the hint as printed). Earlier `thread grep` calls are not searched. Options go before a `--`. |
 | `thread show <line>` | Print the whole log entry that contains that line number of the log (the numbers `grep` prints, or the one in a `[clipped; thread show N]` hint), unclipped. Fails on a line number the log does not have, and on anything that is not a number (a thread id: use `thread open <id>` or `thread export <id>`). |
-| `thread show --last N` | Print the last N entries of the log (at most 30), oldest first, each under `<id>:<line>` and its header. They are whole when together they fit in about 6000 characters; otherwise the longest are cut, each ends with `[clipped; thread show N]`, and a last line says how many were cut. Give a line number or `--last`, not both. |
+| `thread show --last N` | Print the last N entries of the log (at most 30), oldest first, each under `<id>:<line>` and its header. They are whole when together they fit in about 6000 characters; otherwise the longest are cut, each ends with `[clipped; thread show N]`, and a last line says how many were cut. Give a line number or `--last`, not both. `--type user,assistant` (the entry type names `thread grep` takes; also with `--from`) prints only those entry types, e.g. to leave out long tool results. |
 | `thread show --from LINE [N]` | Print N entries (default and at most 30) from the entry that contains that log line on, oldest first, cut like `--last`. Asked for more than 30, it ends with the command for the next ones. |
 | `thread detach` | Stop capturing this session. |
-| `thread close` | Close with a final summary (arguments or stdin). The log is kept. First it captures what other sessions bound to the thread left uncaptured, as `thread open` does, with the same `recovered N transcript lines ...` line (its command is `thread show -t <id> --from A K`). |
+| `thread close` | Close with a final summary (arguments or stdin). The log is kept. Of two closes at the same moment one wins; the other fails with "thread <id> is closed; ..." and writes nothing. First it captures what other sessions bound to the thread left uncaptured, as `thread open` does, with the same `recovered N transcript lines ...` line (its command is `thread show -t <id> --from A K`). |
 | `thread reopen <id>` | Reopen a closed thread and bind this session. Fails on an open thread. |
 | `thread export <id>` | Print the summary and all notes as markdown. Each note is one list item; its later lines are indented by two spaces, so a heading or a list inside a note stays inside the item. |
 | `thread hook` | Hook entry point; reads Claude Code's hook JSON on stdin. |
@@ -225,6 +226,7 @@ still adds to one.
   <id>/summary.md    current summary
   .sessions/         which thread each session is bound to, and how much of it is captured;
                      a `.lock` file exists only while one command or hook is capturing
+  <id>/.lock         exists only while one `thread checkpoint` or `thread close` of the thread runs
   errors.log         hook failures (a hook never blocks a session)
 ```
 

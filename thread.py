@@ -428,16 +428,19 @@ _held = set()
 
 
 @contextlib.contextmanager
-def locked(sid):
+def locked(sid, tid=None):
     """One process at a time reads a session's offset, appends and saves the offset: without this,
-    parallel `thread` commands store the same transcript lines several times."""
+    parallel `thread` commands store the same transcript lines several times. With `tid` the lock
+    is the thread's: one checkpoint or close of it at a time. Order: thread lock, then session lock."""
     p = state_path(sid)
-    if not p or sid in _held:
+    lock = home() / tid / ".lock" if tid else p and p.with_suffix(".lock")
+    sid = ("thread", tid) if tid else sid
+    if not lock or sid in _held:
         yield
         return
-    lock = p.with_suffix(".lock")
-    home().mkdir(parents=True, exist_ok=True, mode=0o700)
-    lock.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if not tid:  # the folder of a thread is there, or the thread was removed: do not make it again
+        home().mkdir(parents=True, exist_ok=True, mode=0o700)
+        lock.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     while True:
         try:
             os.close(os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
@@ -738,6 +741,11 @@ def cmd_note(a):
 
 def cmd_checkpoint(a, close=False):
     tid, text, sid = target(a), read_text(a.text), session_id()
+    with locked(sid, tid):  # status check, log, summary and meta.json as one step: one of two parallel closes wins
+        _checkpoint(tid, text, sid, close)
+
+
+def _checkpoint(tid, text, sid, close):
     if not is_open(tid):
         die(f"thread {tid} is closed; only notes can be added. `thread reopen {tid}` first")
     try_capture(sid)
@@ -789,7 +797,7 @@ def clip(line, start=0, n=None):
 LAST_MAX = 30  # entries `thread show --last` prints at most
 
 
-def show_last(tid, lines, n, start=None):
+def show_last(tid, lines, n, start=None, types=()):
     """The last n entries of the log, or n entries from the one that holds line `start`; oldest
     first, whole unless together they pass CAP."""
     if not re.fullmatch(r"\d+", n) or int(n) < 1:  # a string, as `line` is: the message says what to give
@@ -799,15 +807,20 @@ def show_last(tid, lines, n, start=None):
     every = [i for i, l in enumerate(lines) if HDR.match(l)]
     if not every:
         die(f"the log of {tid} has no entries")
-    lo = max(0, len(every) - min(n, LAST_MAX))
+    spans = list(zip(every, every[1:] + [len(lines)]))
     if start is not None:
         if not re.fullmatch(r"\d+", start) or not 1 <= int(start) <= len(lines):
             die(f"no line {start} in the log of {tid}: it has {len(lines)} lines")
         lo = sum(1 for h in every if h < int(start)) - 1
         if lo < 0:
             die(f"line {start} of the log of {tid} is not inside an entry")
-    heads = every[lo:lo + min(n, LAST_MAX)]
-    ends = (every + [len(lines)])[lo + 1:lo + 1 + len(heads)]
+        spans = spans[lo:]
+    spans = [s for s in spans if not types or HDR.match(lines[s[0]])[3] in types]
+    if not spans:
+        die(f"no {', '.join(sorted(types))} entries there in the log of {tid}")
+    rest = spans[LAST_MAX:]  # what --from leaves for the next page
+    spans = spans[:min(n, LAST_MAX)] if start is not None else spans[-min(n, LAST_MAX):]
+    heads, ends = [s for s, _ in spans], [e for _, e in spans]
     cur = active(session_id())
     blocks = [printable(f"{tid}:{s + 1}  " + "\n".join(lines[s:e])) for s, e in zip(heads, ends)]
     budget, cut = CAP, 0
@@ -823,20 +836,30 @@ def show_last(tid, lines, n, start=None):
               f"`thread show <line>` prints one whole]")
     if n > LAST_MAX and start is None:
         print(f"[--last prints at most {LAST_MAX} entries]")
-    elif n > LAST_MAX and lo + LAST_MAX < len(every):
-        more = f"--from {every[lo + LAST_MAX] + 1} {n - LAST_MAX}"
+    elif n > LAST_MAX and rest:
+        more = f"--from {rest[0][0] + 1} {n - LAST_MAX}" + (f" --type {','.join(sorted(types))}" if types else "")
         print(f"[--from prints at most {LAST_MAX} entries; the next ones: `{show_cmd(tid, more, cur)}`]")
+
+
+def entry_types(arg):
+    types = set((arg or "").replace(",", " ").split())
+    if types - set(TYPES):
+        die(f"unknown entry type {', '.join(sorted(types - set(TYPES)))}; the types are {', '.join(TYPES)}")
+    return types
 
 
 def cmd_show(a):
     if (a.line is None) == (a.last is None) and a.start is None or a.start is not None and a.last is not None:
         die("show takes a log line number (see `thread grep`) or `--last N`, one of the two; "
             "`--from LINE [N]` prints N entries from a line on")
+    types = entry_types(a.type)
+    if types and a.last is None and a.start is None:
+        die("--type goes with `--last N` or `--from LINE [N]`")
     if a.last is not None or a.start is not None:
         tid = target(a)
         p = home() / tid / "log.txt"
         lines = p.read_text(encoding="utf-8", errors="replace").splitlines() if p.exists() else []
-        return show_last(tid, lines, (a.line or str(LAST_MAX)) if a.last is None else a.last, a.start)
+        return show_last(tid, lines, (a.line or str(LAST_MAX)) if a.last is None else a.last, a.start, types)
     if not re.fullmatch(r"[+-]?\d+", a.line):
         die("show takes a log line number (see `thread grep`); to read a thread use "
             "`thread open <id>` or `thread export <id>`")
@@ -866,9 +889,7 @@ def cmd_grep(a):
         die("use --all or -t, not both")
     if a.offset <= 0:
         try_capture(session_id())  # page 1 sees the turn in progress; later pages need a stable log
-    types = {t for t in (a.type or "").replace(",", " ").split()}
-    if types - set(TYPES):
-        die(f"unknown entry type {', '.join(sorted(types - set(TYPES)))}; the types are {', '.join(TYPES)}")
+    types = entry_types(a.type)
     ctx = min(max(a.context, 0), 3)
     cur = active(session_id())
     hits = []  # (entry time, thread, entry line, line, header, {line: text} with context)
@@ -1030,6 +1051,11 @@ def cmd_hook(a):
         elif tid:
             print(printable(f"Active thread: {tid} ({meta(tid)['title']}). This session is captured into it."))
         else:
+            lost = (state(sid) or {}).get("lost")
+            if isinstance(lost, str):  # not cleared here: the session's next command says it once more
+                print(printable(f"Thread {lost} was closed or removed by another session, so this session is no "
+                                f"longer captured. Continue it (`thread open {lost}`, or `thread reopen {lost}` "
+                                f"when it is closed) only if you are asked to."))
             norm = lambda path: os.path.normcase(os.path.realpath(path)).rstrip(os.sep)
             is_root = lambda path: os.path.dirname(path + os.sep) == path + os.sep  # "" is "/"
             here, near = norm(d.get("cwd") or os.getcwd()), []
@@ -1102,6 +1128,7 @@ def main(argv=None):
     s.add_argument("--last", metavar="N", help="print the last N entries of the log (max 30), oldest first")
     s.add_argument("--from", dest="start", metavar="LINE",
                    help="print the entries from this log line on: `--from LINE [N]`, N entries (default and max 30)")
+    s.add_argument("--type", help="with --last or --from: print only these entry types, e.g. user,assistant")
     s = cmd("list", cmd_list, "list open threads")
     s.add_argument("--all", action="store_true", help="include closed threads")
     s.add_argument("--kind")

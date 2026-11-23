@@ -51,7 +51,9 @@ All commands are the local `thread` CLI. It uses no network.
   stdin within 5 s` when stdin is an open pipe that sends nothing, and at once with `no text: pass
   it as arguments or on stdin` when stdin is a terminal.
 - If a command says the thread "was closed or removed by another session", this session is no
-  longer captured. It says so once; after that, commands say `no active thread`. Tell the user,
+  longer captured. It says so once; after that, commands say `no active thread`. Until a command
+  has said it, each session start (resume, compaction) prints the same fact as `Thread <id> was
+  closed or removed by another session, ...`. Tell the user,
   and open the thread again only if they ask.
 - Run `thread grep` as a command on its own. Its call and output are stored but never searched
   (the output only repeats the log), and anything else the same shell command prints becomes
@@ -81,7 +83,7 @@ All commands are the local `thread` CLI. It uses no network.
 | Replace the summary | `thread checkpoint` with the summary on stdin |
 | Recall details | `thread grep <regex>` |
 | Read one log entry whole | `thread show <line>` (a line number from `grep` or a `[clipped; ...]` hint) |
-| Read the end of the log | `thread show --last N` (the last N entries, oldest first; at most 30) |
+| Read the end of the log | `thread show --last N` (the last N entries, oldest first; at most 30; `--type user,assistant` prints only those entry types, also with `--from`) |
 | Read entries from a log line on | `thread show --from <line> [N]` (N entries, default and at most 30) |
 | Stop capturing this session | `thread detach` |
 | Close out | `thread close` with the final summary on stdin |
