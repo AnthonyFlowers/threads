@@ -119,8 +119,22 @@ The short version is in the [README](../README.md#what-it-does-not-capture).
   that are not UTF-8 are shown as `�`. The folder name is the thread id: a folder renamed by hand keeps
   working, and the next `close` or `reopen` corrects the `id` in its `meta.json`. A `closes` that is
   not a number counts as 0, and `thread close` says so.
-- `thread list` shows the day of the last log activity in UTC, as the log and `meta.json` do; it
-  can differ from the local date.
+- `thread list` shows the date and time (to the minute) of the last log activity in UTC, as the
+  log and `meta.json` do; they can differ from the local date and time.
+- `thread grep` stops a search after 3 s, with a message that says to simplify the pattern: a
+  pattern with a repeat inside a repeat can otherwise run without end. A second small Python
+  process watches the time (the regex engine cannot be interrupted from inside the process on
+  Windows), so each `thread grep` starts one. On a machine where it cannot be started, the search
+  has no time bound. A search of several hundred MB of logs can reach the 3 s too: narrow it with `-t`.
+- Text on stdin (`note`, `checkpoint`, `close`) is read as UTF-8 or, by its byte-order mark or NUL
+  bytes, as UTF-16; NUL characters are never stored. Bytes of another encoding (cp1252) that are not
+  valid UTF-8 become `�` (U+FFFD). UTF-16 without a mark is taken as little-endian or big-endian by
+  where most of its NUL bytes are, which is right for text that is mostly Latin letters.
+- Output is written when a command is done. A reader that closes the pipe early (`| head`) does not
+  stop the command's work and gets no error; the exit status is then 0.
+- In `thread show`, only a line in the first column is an entry header; body lines are indented by
+  two spaces (empty lines stay empty). `thread open` indents the later lines of each entry the same
+  way, and `thread grep` prints body lines under their line number. The summary is printed as written.
 - Inside an entry, unusual line separators (form feed, U+2028, CR) are stored as newlines, and a
   body line that starts with `=== ` gains a leading space.
 - A resumed session keeps its id and its binding. A forked session (`--fork-session`, `/branch`)

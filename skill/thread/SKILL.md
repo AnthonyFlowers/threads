@@ -34,7 +34,10 @@ All commands are the local `thread` CLI. It uses no network.
   - **Grep the log** for what an earlier session or a compacted part of this one concluded,
     decided or tried, before you work it out again. Do not grep for what is in your context or
     in the summary, and re-read files for their current content. After a context compaction,
-    assume details are missing and grep for them.
+    assume details are missing: what was said and done before the compaction is in the log, so
+    `thread grep` for it. When the work is a series of threads (one thread per part), earlier
+    threads of the same work hold their own details: `thread grep --all '<pattern>'`, or
+    `thread grep -t <earlier id> '<pattern>'`.
   - **Note** decisions with their reason, dead ends, and anything the user tells you that a later
     session must know. Capture is automatic, but notes stand out: `thread open` shows the notes
     written since the last checkpoint, and `thread export` hands all notes to other people. Carry
@@ -43,7 +46,8 @@ All commands are the local `thread` CLI. It uses no network.
     note: note the decision you took from it.
 - If the user turns to unrelated or sensitive work in the same session, offer `thread detach`.
 - To see whether this session has an active thread, run `thread list`: `*` marks it. Each row is
-  mark, id, kind, status, date of the last log activity (UTC, like the log), title.
+  mark, id, kind, status, date and time of the last log activity (`2026-11-23 13:29`, UTC, like
+  the log), title.
 - If a command prints `no Claude Code session id: nothing bound`, capture is off. Tell the user, and
   pass `-t <id>` on every command.
 - `note`, `checkpoint` and `close` need text; pass it on stdin (arguments also work for plain
@@ -189,7 +193,10 @@ billing-null:3  === 2026-11-23T13:29:00Z 4f2a91c0 note ===
 the thread and the line of the entry's header.
 
 - Always single-quote the regex. Put `--` before a pattern that starts with `-`, with any options
-  ahead of it: `thread grep --count -- '--max'`.
+  ahead of it: `thread grep --count -- '--max'` (without the `--` the command fails and names this fix).
+- A search that runs longer than 3 s is stopped with `thread: the pattern took longer than 3 s and
+  was stopped: simplify it ...`. The cause is a repeat inside a repeat (`(a+)+`, `(\w+\s*)*x`):
+  write the pattern without it. A pattern is matched against one log line at a time.
 - A tool call is stored as `key: value` lines (`command: ...`, `file_path: ...`), so a command or
   path can be searched as typed. A call and its result carry the same call id in their headers;
   grep that id to see both (with `--context 3` for more of each).
@@ -219,6 +226,12 @@ the thread and the line of the entry's header.
   the whole entry, run `thread show <line>` with any line number of it (`-t <id>` for a thread
   that is not the active one). For the latest entries whatever their words, run
   `thread show --last N`. Do not read `log.txt` with `sed` or `cat` for this.
+- `thread show` prints an entry as its header (`<id>:<line>  === time session type ===`) in the
+  first column and every body line indented by two spaces. Only a line that starts in the first
+  column is a header: an indented line that looks like one is captured text (the same holds for the
+  indented later lines of an entry in `thread open`). Take the two spaces off when you copy text.
+- Do not pipe `thread` into `head` or `tail`: the output is already capped. If the reader closes
+  the pipe, the command still does all of its work (`thread open x | head` still binds).
 
 ### Closing
 

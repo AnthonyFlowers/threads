@@ -7,6 +7,7 @@ all under ~/.threads/<id>/. Standard library only, no network. See README.md.
 import argparse
 import contextlib
 import glob
+import io
 import json
 import os
 import re
@@ -585,6 +586,24 @@ def stdin_ready(seconds=5):
         return True  # not a real file (tests), or it cannot be watched
 
 
+def stdin_text():
+    """Stdin as text. Windows PowerShell 5.1 sends UTF-16 (`>` files, some pipes): read as UTF-8 it
+    would be stored with a NUL between letters, which no search finds. Other bytes that are not
+    UTF-8 (cp1252) become U+FFFD, as before."""
+    raw = getattr(sys.stdin, "buffer", None)
+    if raw is None:
+        return sys.stdin.read()  # not a real file (tests)
+    data = raw.read()
+    if data[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        text = data.decode("utf-16", "replace")  # the mark says which byte order
+    elif b"\0" in data:  # no mark: ASCII text in UTF-16 has its NULs at the odd places (LE) or the even ones
+        le = data[1::2].count(0) >= data[0::2].count(0)
+        text = data.decode("utf-16-le" if le else "utf-16-be", "replace")
+    else:
+        text = data.decode("utf-8", "replace")
+    return text.replace("\0", "").replace("\r\n", "\n").replace("\r", "\n")
+
+
 def read_text(parts):
     parts = parts[1:] if parts[:1] == ["--"] else parts
     if not parts:
@@ -592,7 +611,7 @@ def read_text(parts):
             die("no text: pass it as arguments or on stdin")
         if not stdin_ready():
             die("no text arrived on stdin within 5 s: pass it as arguments or a heredoc")
-    text = (" ".join(parts) if parts else sys.stdin.read()).lstrip("\ufeff")  # PowerShell may add a BOM
+    text = (" ".join(parts) if parts else stdin_text()).lstrip("\ufeff")  # PowerShell may add a BOM
     if not text.strip():
         die("empty text")
     return text.strip()
@@ -641,8 +660,10 @@ def show(tid, cur=None):
         return
     notes = [e for e in since if e[3] == "note"]
     msgs = [e for e in since if e[3] in ("user", "assistant")][-6:]
+    # later lines of an entry are indented: a captured line cannot pass for the `[time type]` start of one
     text = printable("\n".join(
-        f"[{e[1]} {e[3]}] {e[5][:600]}{f'… [clipped; {show_cmd(tid, e[0], cur)}]' if len(e[5]) > 600 else ''}"
+        f"[{e[1]} {e[3]}] " + re.sub(r"\n(?=[^\n])", "\n  ", e[5][:600])
+        + (f"… [clipped; {show_cmd(tid, e[0], cur)}]" if len(e[5]) > 600 else "")
         for e in sorted(notes + msgs)))
     if len(text) > CAP:
         text = "…" + text[-CAP:]
@@ -794,6 +815,12 @@ def clip(line, start=0, n=None):
     return ("…" if s else "") + line[s:s + 400] + "…" + (f" [clipped; {n}]" if n else "")
 
 
+def block(tid, lines, s, e):
+    """Log lines s..e (one entry) as `thread show` prints them: `<id>:<line>  <header>`, then the
+    body indented by two spaces, so only a real header starts in the first column."""
+    return printable("\n".join([f"{tid}:{s + 1}  {lines[s]}"] + [l and "  " + l for l in lines[s + 1:e]]))
+
+
 LAST_MAX = 30  # entries `thread show --last` prints at most
 
 
@@ -822,7 +849,7 @@ def show_last(tid, lines, n, start=None, types=()):
     spans = spans[:min(n, LAST_MAX)] if start is not None else spans[-min(n, LAST_MAX):]
     heads, ends = [s for s, _ in spans], [e for _, e in spans]
     cur = active(session_id())
-    blocks = [printable(f"{tid}:{s + 1}  " + "\n".join(lines[s:e])) for s, e in zip(heads, ends)]
+    blocks = [block(tid, lines, s, e) for s, e in zip(heads, ends)]
     budget, cut = CAP, 0
     # shortest first, so what a short entry leaves of its share goes to the longer ones
     for k, i in enumerate(sorted(range(len(blocks)), key=lambda i: len(blocks[i]))):
@@ -877,7 +904,42 @@ def cmd_show(a):
     end = start + 1
     while end < len(lines) and not HDR.match(lines[end]):
         end += 1
-    print(printable(f"{tid}:{start + 1}  " + "\n".join(lines[start:end])))
+    print(block(tid, lines, start, end))
+
+
+GREP_SECONDS = 3  # a search of the log takes far less; a pattern with nested repeats can take years
+
+# A second process, because the regex engine holds the interpreter lock while it matches: no thread
+# of this process could stop it, and SIGALRM does not exist on Windows. It ends when its stdin
+# closes (the search is done, or this process is gone); after the deadline it stops this process.
+WATCHDOG = """import os, signal, sys, threading
+t = threading.Thread(target=sys.stdin.read, daemon=True)
+t.start()
+t.join(float(sys.argv[2]))
+if t.is_alive():
+    sys.stderr.write("thread: the pattern took longer than %s s and was stopped: simplify it "
+                     "(a repeat inside a repeat, like `(a+)+`, is the usual cause)\\n" % sys.argv[2])
+    sys.stderr.flush()
+    os.kill(int(sys.argv[1]), signal.SIGTERM)
+"""
+
+
+@contextlib.contextmanager
+def deadline(seconds):
+    import subprocess
+    try:
+        # -B -S: it writes no bytecode files and skips site, so it starts faster
+        w = subprocess.Popen([sys.executable, "-BS", "-c", WATCHDOG, str(os.getpid()), str(seconds)],
+                             stdin=subprocess.PIPE, stdout=subprocess.DEVNULL)
+    except OSError:
+        w = None  # shortcut: no second process, no time bound; the search itself must not fail for it
+    try:
+        yield
+    finally:
+        if w:
+            with contextlib.suppress(OSError):
+                w.stdin.close()
+            w.returncode = 0  # not waited for: it ends by itself, and this keeps Popen's warning away
 
 
 def cmd_grep(a):
@@ -894,7 +956,35 @@ def cmd_grep(a):
     cur = active(session_id())
     hits = []  # (entry time, thread, entry line, line, header, {line: text} with context)
     by_type, by_thread = {}, {}
-    for tid in (all_ids() if a.all else [target(a)]):
+    ids = all_ids() if a.all else [target(a)]
+    with deadline(GREP_SECONDS):  # state changes (the capture) are done; only reading from here on
+        _search(a, rx, ids, types, ctx, cur, hits, by_type, by_thread)
+    total = sum(by_type.values())
+    spread = lambda d: ", ".join(f"{k} {v}" for k, v in sorted(d.items(), key=lambda kv: -kv[1]))
+    extra = ([f"[by type: {spread(by_type)}]"] if len(by_type) > 1 else []) + \
+            ([f"[by thread: {spread(by_thread)}]"] if a.all and by_thread else [])
+    if a.count:
+        print("\n".join([str(total)] + extra))
+        return
+    # newest entry first (a later decision replaces an earlier one); inside an entry, top to bottom
+    hits.sort(key=lambda h: (h[0], h[1], h[2]), reverse=not a.oldest)
+    hits = [h for _, group in _grouped(hits) for h in sorted(group, key=lambda h: h[3])]
+    first, size = max(a.offset, 0), min(max(a.max, 1), 30)
+    shown, text = 0, ""
+    for n in range(1, len(hits[first:first + size]) + 1):
+        trial = _page(hits[first:first + n])
+        if shown and len(trial) > CAP:
+            break  # the page ends early; the footer points at the first match not shown
+        shown, text = n, trial
+    if text:
+        print(text)
+    end = first + shown
+    more = f"; next page: --offset {end}" if end < total else ""
+    print("\n".join([f"[matches {first + 1 if shown else 0}-{end if shown else 0} of {total}{more}]"] + extra))
+
+
+def _search(a, rx, ids, types, ctx, cur, hits, by_type, by_thread):
+    for tid in ids:
         p = home() / tid / "log.txt"
         if not p.exists():
             continue
@@ -937,28 +1027,6 @@ def cmd_grep(a):
                 hi += 1
             near = {j + 1: clip(lines[j], m.start() if j == i else 0, show_cmd(tid, j + 1, cur)) for j in range(lo, hi + 1) if j > start}
             hits.append((head.split()[1][:19] if head else "", tid, start + 1, i + 1, head, near))
-    total = sum(by_type.values())
-    spread = lambda d: ", ".join(f"{k} {v}" for k, v in sorted(d.items(), key=lambda kv: -kv[1]))
-    extra = ([f"[by type: {spread(by_type)}]"] if len(by_type) > 1 else []) + \
-            ([f"[by thread: {spread(by_thread)}]"] if a.all and by_thread else [])
-    if a.count:
-        print("\n".join([str(total)] + extra))
-        return
-    # newest entry first (a later decision replaces an earlier one); inside an entry, top to bottom
-    hits.sort(key=lambda h: (h[0], h[1], h[2]), reverse=not a.oldest)
-    hits = [h for _, group in _grouped(hits) for h in sorted(group, key=lambda h: h[3])]
-    first, size = max(a.offset, 0), min(max(a.max, 1), 30)
-    shown, text = 0, ""
-    for n in range(1, len(hits[first:first + size]) + 1):
-        trial = _page(hits[first:first + n])
-        if shown and len(trial) > CAP:
-            break  # the page ends early; the footer points at the first match not shown
-        shown, text = n, trial
-    if text:
-        print(text)
-    end = first + shown
-    more = f"; next page: --offset {end}" if end < total else ""
-    print("\n".join([f"[matches {first + 1 if shown else 0}-{end if shown else 0} of {total}{more}]"] + extra))
 
 
 def _grouped(hits):
@@ -998,7 +1066,7 @@ def cmd_list(a):
             if (m["status"] == "open" or a.all) and (not a.kind or str(m["kind"]).lower() == a.kind.lower()):
                 t = activity(tid)  # shown in UTC, as the log and meta.json are
                 rows.append((t, printable(f"{'*' if tid == cur else ' '} {tid}  {m['kind'] or '-'}  {m['status']}"
-                                          f"  {time.strftime('%Y-%m-%d', time.gmtime(t))}  {m['title']}")))
+                                          f"  {time.strftime('%Y-%m-%d %H:%M', time.gmtime(t))}  {m['title']}")))
         except (OSError, ValueError, KeyError, TypeError):
             continue  # unreadable meta.json: leave it out rather than fail the listing
     print("\n".join(r for _, r in sorted(rows, reverse=True)) or "(no threads)")
@@ -1039,8 +1107,10 @@ def cmd_hook(a):
             return  # only a session start of the main agent prints anything
         if tid and d.get("source") == "compact":
             text, since = printable(summary(tid).strip()), since_checkpoint(tid)
-            print(f"Active thread: {tid} ({meta(tid)['title']}). Details lost to compaction are in "
-                  f"its log: run `thread grep <regex>` before re-deriving anything.\n\n"
+            print(f"Active thread: {tid} ({meta(tid)['title']}). Details from before the compaction are in "
+                  f"its log (run `thread grep <regex>` before re-deriving anything), and when this work is "
+                  f"a series of threads (one per part), earlier threads hold their own details: "
+                  f"`thread grep --all '<pattern>'` or `thread grep -t <earlier id> '<pattern>'`.\n\n"
                   # Claude Code keeps only a preview of hook output above 10,000 characters
                   f"Thread summary:\n{text[:CAP] or '(no checkpoint yet)'}"
                   + (f"\n…[cut at {CAP} characters; `thread open {tid}` prints all of it]"
@@ -1138,11 +1208,35 @@ def main(argv=None):
     for s in (sys.stdin, sys.stdout, sys.stderr):
         if hasattr(s, "reconfigure"):  # Windows pipes default to the locale code page
             s.reconfigure(encoding="utf-8", errors="replace")
+
+    def hinted(parser, grep):
+        plain = parser.error
+
+        def error(msg):  # argparse takes `-x` for an option and says only that the pattern is missing
+            if grep() and ("required: pattern" in msg or "unrecognized arguments: -" in msg):
+                msg += "; a pattern that starts with `-` goes after `--`: `thread grep -- -x`"
+            plain(msg)
+        parser.error = error
+    hinted(sub.choices["grep"], lambda: True)
+    hinted(p, lambda: (sys.argv[1:] if argv is None else argv)[:1] == ["grep"])
     a = p.parse_args(argv)
+    # Output is collected and written once the command is done: everything a command changes (bind,
+    # recover, capture, save) happens whether or not stdout can be written (`thread open x | head`).
+    out, real = io.StringIO(), sys.stdout
+    sys.stdout = out
     try:
-        a.fn(a)
-    except ValueError as e:  # a damaged meta.json; the hook has its own handler and never gets here
-        die(f"{e}: repair or remove the file under {home()}")
+        try:
+            a.fn(a)
+        except ValueError as e:  # a damaged meta.json; the hook has its own handler and never gets here
+            die(f"{e}: repair or remove the file under {home()}")
+    finally:
+        sys.stdout = real
+        try:
+            real.write(out.getvalue())
+            real.flush()
+        except OSError:  # the reader closed the pipe (BrokenPipeError; EINVAL on Windows): end quietly
+            with contextlib.suppress(Exception):  # so the flush at exit does not fail again
+                os.dup2(os.open(os.devnull, os.O_WRONLY), real.fileno())
 
 
 if __name__ == "__main__":
